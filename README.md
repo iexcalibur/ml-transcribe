@@ -3,7 +3,7 @@
 TSTorch is a model execution observability runtime for developers who need to know whether a neural network will actually work on a real device.
 Unlike PyTorch or ONNX Runtime, which focus on running models, TSTorch focuses on **revealing what actually happened while the model executed**. That is, latency sources, memory peaks, GPU dispatch behavior, and operator fusion.
 
-## Typical workflow:
+## Typical workflow
 
 1. Train or fine-tune in PyTorch
 2. Export to ONNX
@@ -38,6 +38,15 @@ Note: while TSTorch is capable and correct for training, serving APIs, and maxim
 ## Project status
 
 Active early development.
+
+Features:
+- Tensor operations
+- Computation graph
+- Backpropogation
+- Autograd
+- Multi-threaded accelerated operations
+- GPU accelerated operations
+- Matrix-multiplication using tensor-cores
 
 Goals:
 
