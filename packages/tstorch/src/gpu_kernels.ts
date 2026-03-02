@@ -504,3 +504,87 @@ fn main(
 }
 `;
 }
+
+// ---- Tensor core matmul via experimental subgroup matrix ----
+
+export const TC_TILE = 8; // Apple Metal simdgroup_matrix tile dimension
+
+/**
+ * Experimental tensor-core-accelerated matmul shader using the Dawn/Chrome
+ * `chromium_experimental_subgroup_matrix` extension.
+ *
+ * On Apple Silicon (Metal), this maps to `simdgroup_matrix` 8x8 f32 hardware
+ * instructions. On Vulkan with VK_KHR_cooperative_matrix it maps to the
+ * equivalent SPIR-V ops.
+ *
+ * @param workgroupX - must equal the device's maxSubgroupSize (e.g. 64 on
+ *   Apple M-series via Dawn, 32 or 64 on Vulkan). The WebGPU spec requires
+ *   the x-dimension of workgroup_size to be a multiple of maxSubgroupSize
+ *   when the shader uses subgroup matrices.
+ *
+ * Constraints (checked by the caller on the TS side):
+ *   - All tensors must be contiguous (natural row-major strides)
+ *   - M, N, K must all be multiples of TC_TILE (8)
+ *   - Batch dimensions of A and B must match exactly (no broadcasting)
+ *
+ * Dispatch: (N/TC_TILE, M/TC_TILE, batchSize).
+ * Each workgroup computes one 8x8 output tile by tiling over the K dimension
+ * with subgroupMatrixLoad / MultiplyAccumulate / Store.
+ */
+export function buildTensorCoreMatMulShader(workgroupX: number): string {
+    return `
+enable chromium_experimental_subgroup_matrix;
+
+const TILE: u32 = ${TC_TILE}u;
+
+@group(0) @binding(0) var<storage, read> a_data: array<f32>;
+@group(0) @binding(1) var<storage, read> b_data: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out_data: array<f32>;
+
+struct Params {
+    batch_size: u32,
+    M: u32,
+    N: u32,
+    K: u32,
+}
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(${workgroupX}, 1, 1)
+fn main(@builtin(workgroup_id) wid: vec3u) {
+    let tile_row = wid.y * TILE;
+    let tile_col = wid.x * TILE;
+    let batch = wid.z;
+
+    let a_base = batch * params.M * params.K;
+    let b_base = batch * params.K * params.N;
+    let out_base = batch * params.M * params.N;
+
+    // Zero-initialise 8x8 accumulator distributed across the subgroup
+    var acc = subgroup_matrix_result<f32, 8, 8>(0.0);
+
+    // Tile over the shared K dimension
+    let num_tiles = params.K / TILE;
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        let k = t * TILE;
+
+        // Load 8x8 tile of A (row-major, stride = K columns)
+        let a_tile = subgroupMatrixLoad<subgroup_matrix_left<f32, 8, 8>>(
+            &a_data, a_base + tile_row * params.K + k, false, params.K
+        );
+
+        // Load 8x8 tile of B (row-major, stride = N columns)
+        let b_tile = subgroupMatrixLoad<subgroup_matrix_right<f32, 8, 8>>(
+            &b_data, b_base + k * params.N + tile_col, false, params.N
+        );
+
+        // Hardware multiply-accumulate: acc += a_tile * b_tile
+        acc = subgroupMatrixMultiplyAccumulate(a_tile, b_tile, acc);
+    }
+
+    // Single store of the 8x8 result tile to global memory
+    subgroupMatrixStore(
+        &out_data, out_base + tile_row * params.N + tile_col, acc, false, params.N
+    );
+}
+`;
+}

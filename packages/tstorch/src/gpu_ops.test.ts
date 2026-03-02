@@ -1,13 +1,14 @@
 import { describe, test, expect, afterAll } from '@jest/globals';
-import { _sumPractice, gpuTensorMap, gpuTensorZip, gpuTensorReduce, gpuTensorMatrixMultiply } from './gpu_ops.js';
+import { _sumPractice, gpuTensorMap, gpuTensorZip, gpuTensorReduce, gpuTensorMatrixMultiply, gpuTensorMatrixMultiplyTensorCore } from './gpu_ops.js';
 import { tensorMap, tensorZip, tensorReduce } from './tensor_ops.js';
 import { TensorData, shapeProduct, toIndex, broadcastIndex, indexToPosition } from './tensor_data.js';
 import type { Storage, Shape, Strides } from './tensor_data.js';
-import { destroyDevice } from './gpu_backend.js';
+import { destroyDevice, getTensorCoreDevice, destroyTensorCoreDevice } from './gpu_backend.js';
 import { WORKGROUP_SIZE } from './gpu_kernels.js';
 import * as ops from './operators.js';
 
 afterAll(() => {
+    destroyTensorCoreDevice();
     destroyDevice();
 });
 
@@ -652,5 +653,74 @@ describe('gpuTensorMatrixMultiply', () => {
         );
 
         expectClose(gpuOut.storage, cpuOut.storage);
+    });
+});
+
+// ============================================================
+// gpuTensorMatrixMultiplyTensorCore (experimental)
+// ============================================================
+
+// Precondition tests for tensor core matmul -- these never touch the GPU
+// so they're safe to run alongside other tests.
+describe('gpuTensorMatrixMultiplyTensorCore preconditions', () => {
+    test('returns false when dims are not multiples of 8', async () => {
+        const a = new TensorData(new Float64Array(2 * 3).fill(1), [2, 3]);
+        const b = new TensorData(new Float64Array(3 * 4).fill(1), [3, 4]);
+        const out = TensorData.zeros([2, 4]);
+
+        const used = await gpuTensorMatrixMultiplyTensorCore(
+            out.storage, out.shape, out.strides, out.size,
+            a.storage, a.shape, a.strides,
+            b.storage, b.shape, b.strides,
+        );
+        expect(used).toBe(false);
+    });
+
+    test('returns false for non-contiguous (permuted) input', async () => {
+        const aOrig = new TensorData(new Float64Array(16 * 8).fill(1), [16, 8]);
+        const a = aOrig.permute(1, 0); // [8, 16] but non-contiguous
+        const b = new TensorData(new Float64Array(16 * 8).fill(1), [16, 8]);
+        const out = TensorData.zeros([8, 8]);
+
+        const used = await gpuTensorMatrixMultiplyTensorCore(
+            out.storage, out.shape, out.strides, out.size,
+            a.storage, a.shape, a.strides,
+            b.storage, b.shape, b.strides,
+        );
+        expect(used).toBe(false);
+    });
+});
+
+// Hardware tensor core test -- kept in its own describe so it can be run
+// in isolation. Dawn's experimental subgroup matrix feature triggers a
+// SIGSEGV during Node process teardown when combined with the regular GPU
+// device; the compute results themselves are correct.
+// Run with:  npx jest --testNamePattern 'tensor core matmul parity'
+describe('gpuTensorMatrixMultiplyTensorCore hardware', () => {
+    test('tensor core matmul parity with CPU (if hw available)', async () => {
+        const tcDevice = await getTensorCoreDevice();
+        if (!tcDevice) return;
+
+        const N = 8;
+        const aData = new Float64Array(N * N);
+        const bData = new Float64Array(N * N);
+        for (let i = 0; i < N * N; i++) {
+            aData[i] = Math.sin(i * 0.1);
+            bData[i] = Math.cos(i * 0.1);
+        }
+        const a = new TensorData(aData, [N, N]);
+        const b = new TensorData(bData, [N, N]);
+        const tcOut = TensorData.zeros([N, N]);
+        const cpuOut = TensorData.zeros([N, N]);
+
+        cpuMatMul(a, b, cpuOut);
+
+        const used = await gpuTensorMatrixMultiplyTensorCore(
+            tcOut.storage, tcOut.shape, tcOut.strides, tcOut.size,
+            a.storage, a.shape, a.strides,
+            b.storage, b.shape, b.strides,
+        );
+        expect(used).toBe(true);
+        expectClose(tcOut.storage, cpuOut.storage, 1e-2);
     });
 });
