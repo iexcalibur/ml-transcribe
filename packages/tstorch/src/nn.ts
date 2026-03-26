@@ -24,12 +24,14 @@ export function tile(input: Tensor, kernel: [number, number]): [Tensor, number, 
     if (!height) throw new Error("input height undefined");
     if (!width) throw new Error("input width undefined");
 
+    // ensure the dimensions for pooling are divisible by the pooling constant
     if (height % kh !== 0) {
         throw new Error("input height must be divisible by kernel height");
     }
     if (width % kw !== 0) {
         throw new Error("input width must be divisible by kernel width");
     }
+    
     const newHeight = height / kh;
     const newWidth = width / kh;
 
@@ -39,4 +41,19 @@ export function tile(input: Tensor, kernel: [number, number]): [Tensor, number, 
     // use other functions such as avgpool2d to reduce over the tiled tensor.
 
     return [tiled, newHeight, newWidth];
+}
+
+
+export function avgpool2d(input: Tensor, kernel: [number, number]) {
+    const [tiled, height, width]: [Tensor, number, number] = tile(input, kernel);
+    const [kh, kw] = kernel;
+
+    const inputData = new TensorData(tiled.data.storage, tiled.shape);
+    const outputData = TensorData.zeros(tiled.shape);
+
+    // reduce over the second dimension
+    const fnAvg = (acc: number) => acc / (kh * kw);
+    const reduceFn = fastTensorReduce(fnAvg)
+    
+    reduceFn(outputData.storage, outputData.shape, outputData.strides, inputData.storage, inputData.shape, inputData.strides, 1);
 }
