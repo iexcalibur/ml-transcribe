@@ -44,7 +44,7 @@ export function tile(input: Tensor, kernel: [number, number]): [Tensor, number, 
 }
 
 
-export function avgpool2d(input: Tensor, kernel: [number, number]) {
+export function avgpool2d(input: Tensor, kernel: [number, number]): Tensor {
     const [tiled, height, width]: [Tensor, number, number] = tile(input, kernel);
     const [kh, kw] = kernel;
 
@@ -53,7 +53,9 @@ export function avgpool2d(input: Tensor, kernel: [number, number]) {
 
     // reduce over the second dimension
     const fnAvg = (acc: number) => acc / (kh * kw);
-    const reduceFn = fastTensorReduce(fnAvg)
-    
+    const reduceFn = fastTensorReduce(fnAvg);
+
     reduceFn(outputData.storage, outputData.shape, outputData.strides, inputData.storage, inputData.shape, inputData.strides, 1);
+
+    return new Tensor(outputData);
 }
