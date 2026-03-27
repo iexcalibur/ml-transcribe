@@ -34,13 +34,10 @@ export function tile(input: Tensor, kernel: [number, number]): [Tensor, number, 
     }
     
     const newHeight = height / kh;
-    const newWidth = width / kh;
+    const newWidth = width / kw;
 
-    // add an extra dimension by applying view.
+    // add 2 extra dimensions by applying view.
     const tiled = input.view(batch, channel, newHeight, kh, newWidth, kw);
-
-    // use other functions such as avgpool2d to reduce over the tiled tensor.
-
     return [tiled, newHeight, newWidth];
 }
 
@@ -55,9 +52,8 @@ export function avgpool2d(input: Tensor, kernel: [number, number]): Tensor {
 
     const [batch, channel] = perm.shape as [number, number, number, number, number, number];
 
-    const inputData = new TensorData(perm.data.storage, perm.shape);
+    const inputData = perm.data;
 
-    const acc = (acc: number, x: number) => (acc + x);
     const reduceFn = fastTensorReduce((acc: number, x: number) => acc + x);
 
     // for 2d convolution pooling, we reduce over both cols and rows
@@ -66,9 +62,9 @@ export function avgpool2d(input: Tensor, kernel: [number, number]): Tensor {
     const sumKw = TensorData.zeros([batch, channel, newHeight, newWidth, kh, 1])
     reduceFn(sumKw.storage, sumKw.shape, sumKw.strides, inputData.storage, inputData.shape, inputData.strides, 5);
 
-    // sum over kh
+    // sum over kh. note we use sumKw instead of inputData now.
     const sumKh = TensorData.zeros([batch, channel, newHeight, newWidth, 1, 1])
-    reduceFn(sumKh.storage, sumKh.shape, sumKh.strides, inputData.storage, inputData.shape, inputData.strides, 4);    
+    reduceFn(sumKh.storage, sumKh.shape, sumKh.strides, sumKw.storage, sumKw.shape, sumKw.strides, 4);    
 
     if (!sumKh.storage) {
         throw new Error("sumKh.storage is undefined");
