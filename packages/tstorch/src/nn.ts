@@ -1,6 +1,4 @@
-import { fastTensorReduce } from "./fast_ops.js"
 import { Tensor } from "./tensor.js"
-import { TensorData } from "./tensor_data.js"
 import "./tensor_functions.js"
 
 /**
@@ -48,14 +46,5 @@ export function avgpool2d(input: Tensor, kernel: [number, number]): Tensor {
 export function maxpool2d(input: Tensor, kernel: [number, number]): Tensor {
     const [batch, channel] = input.shape;
     const [tiled, newHeight, newWidth] = tile(input, kernel);
-
-    const reduceFn = fastTensorReduce((acc: number, x: number) => Math.max(acc, x));
-    const reduced = TensorData.zeros([batch!, channel!, newHeight, newWidth, 1]);
-    reduceFn(
-        reduced.storage, reduced.shape, reduced.strides,
-        tiled.data.storage, tiled.data.shape, tiled.data.strides, 4,
-    );
-
-    const outputData = new TensorData(reduced.storage, [batch!, channel!, newHeight, newWidth]);
-    return new Tensor(outputData);
+    return tiled.max(4).view(batch!, channel!, newHeight, newWidth);
 }
