@@ -1,7 +1,7 @@
 import { Tensor } from "./tensor.js"
 import { TensorData, shapeProduct, type Shape } from "./tensor_data.js"
+import { TensorFunction, TensorContext } from "./tensor_functions.js"
 import { Module, Parameter } from "./module.js"
-import "./tensor_functions.js"
 
 // ============================================================
 // Modules
@@ -42,6 +42,121 @@ export class Sigmoid extends Module {
 export class Tanh extends Module {
     forward(input: Tensor): Tensor {
         return input.mul(2).sigmoid().mul(2).sub(1);
+    }
+}
+
+export class Conv1d extends Module {
+    weight!: Parameter<Tensor>;
+    inChannels: number;
+    outChannels: number;
+    kernelWidth: number;
+
+    constructor(inChannels: number, outChannels: number, kernelWidth: number) {
+        super();
+        this.inChannels = inChannels;
+        this.outChannels = outChannels;
+        this.kernelWidth = kernelWidth;
+        const bound = 1 / Math.sqrt(inChannels * kernelWidth);
+        this.weight = new Parameter(
+            randRange([outChannels, inChannels, kernelWidth], -bound, bound)
+        );
+    }
+
+    forward(input: Tensor): Tensor {
+        return input.conv1d(this.weight.value);
+    }
+}
+
+export class Conv2d extends Module {
+    weight!: Parameter<Tensor>;
+    inChannels: number;
+    outChannels: number;
+    kernelHeight: number;
+    kernelWidth: number;
+
+    constructor(inChannels: number, outChannels: number, kernelSize: [number, number]) {
+        super();
+        this.inChannels = inChannels;
+        this.outChannels = outChannels;
+        this.kernelHeight = kernelSize[0];
+        this.kernelWidth = kernelSize[1];
+        const bound = 1 / Math.sqrt(inChannels * this.kernelHeight * this.kernelWidth);
+        this.weight = new Parameter(
+            randRange([outChannels, inChannels, this.kernelHeight, this.kernelWidth], -bound, bound)
+        );
+    }
+
+    forward(input: Tensor): Tensor {
+        return input.conv2d(this.weight.value);
+    }
+}
+
+/**
+ * Creates a TensorFunction for embedding lookup with efficient O(B*S*D) backward
+ * instead of the naive O(B*S*V*D) one-hot matmul approach.
+ */
+function EmbeddingLookupFn(
+    indices: number[][], batch: number, seqLen: number, numEmb: number, embDim: number
+): typeof TensorFunction {
+    return class EmbeddingLookup extends TensorFunction {
+        static forward(ctx: TensorContext, weight: Tensor): Tensor {
+            ctx.saveForBackward(weight);
+            const wStorage = weight.data.storage;
+            const storage = new Float64Array(batch * seqLen * embDim);
+            let offset = 0;
+            for (let b = 0; b < batch; b++) {
+                for (let s = 0; s < seqLen; s++) {
+                    const idx = indices[b]![s]!;
+                    const wBase = idx * embDim;
+                    for (let d = 0; d < embDim; d++) {
+                        storage[offset++] = wStorage[wBase + d]!;
+                    }
+                }
+            }
+            return new Tensor(new TensorData(storage, [batch, seqLen, embDim]));
+        }
+
+        static backward(ctx: TensorContext, gradOutput: Tensor): Tensor[] {
+            const go = gradOutput.contiguous();
+            const goStorage = go.data.storage;
+            const gradWeight = new Float64Array(numEmb * embDim);
+            let offset = 0;
+            for (let b = 0; b < batch; b++) {
+                for (let s = 0; s < seqLen; s++) {
+                    const idx = indices[b]![s]!;
+                    const wBase = idx * embDim;
+                    for (let d = 0; d < embDim; d++) {
+                        gradWeight[wBase + d] = gradWeight[wBase + d]! + goStorage[offset++]!;
+                    }
+                }
+            }
+            return [new Tensor(new TensorData(gradWeight, [numEmb, embDim]))];
+        }
+    };
+}
+
+export class Embedding extends Module {
+    weight!: Parameter<Tensor>;
+    numEmbeddings: number;
+    embeddingDim: number;
+
+    constructor(numEmbeddings: number, embeddingDim: number, weights?: Tensor) {
+        super();
+        this.numEmbeddings = numEmbeddings;
+        this.embeddingDim = embeddingDim;
+        this.weight = new Parameter(weights ?? randRange([numEmbeddings, embeddingDim], -0.1, 0.1));
+    }
+
+    static fromPretrained(weights: Tensor): Embedding {
+        const [numEmb, embDim] = weights.shape;
+        return new Embedding(numEmb!, embDim!, weights);
+    }
+
+    forward(indices: number[][]): Tensor {
+        const batch = indices.length;
+        const seqLen = indices[0]!.length;
+        const fn = EmbeddingLookupFn(indices, batch, seqLen, this.numEmbeddings, this.embeddingDim);
+        return Tensor.apply(fn, this.weight.value);
     }
 }
 

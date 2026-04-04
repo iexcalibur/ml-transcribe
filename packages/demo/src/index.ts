@@ -8,6 +8,12 @@ if (mode === "scalar") {
     runScalar();
 } else if (mode === "fast") {
     runFastTensor();
+} else if (mode === "mnist") {
+    const { default: runMnist } = await import("./runMnist.js");
+    await runMnist();
+} else if (mode === "sentiment") {
+    const { default: runSentiment } = await import("./runSentiment.js");
+    runSentiment();
 } else {
     runTensor();
 }

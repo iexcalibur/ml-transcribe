@@ -10,6 +10,8 @@
     "start": "pnpm build && node dist/index.js",
     "start:tensor": "pnpm build && node dist/index.js tensor",
     "start:scalar": "pnpm build && node dist/index.js scalar",
-    "start:fast": "pnpm build && node dist/index.js fast"
+    "start:fast": "pnpm build && node dist/index.js fast",
+    "start:mnist": "pnpm build && node dist/index.js mnist",
+    "start:sentiment": "pnpm build && node dist/index.js sentiment"
   }
 }
