@@ -17,7 +17,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 fn broadcast_binary(
     a: TensorId, b: TensorId, store: &mut TensorStore,
     f: fn(f32, f32) -> f32,
@@ -59,7 +59,7 @@ fn broadcast_binary(
 // add
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn add(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let (data, shape) = broadcast_binary(a, b, store, |x, y| x + y);
     let out = store.from_vec(data, &shape);
@@ -196,7 +196,7 @@ pub fn add(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -
 // add_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn add_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::TensorsAndShape(ids, _) = saved {
         let a_shape = store.shape(ids[0]).to_vec();
@@ -234,7 +234,7 @@ pub fn add_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStor
 // mul
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn mul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let (data, shape) = broadcast_binary(a, b, store, |x, y| x * y);
     let out = store.from_vec(data, &shape);
@@ -345,7 +345,7 @@ pub fn mul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -
 // mul_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn mul_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Tensors(ids) = saved {
         let a = ids[0]; let b = ids[1];
@@ -471,7 +471,7 @@ pub fn mul_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStor
 // sub
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn sub(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let (data, shape) = broadcast_binary(a, b, store, |x, y| x - y);
     let out = store.from_vec(data, &shape);
@@ -555,7 +555,7 @@ pub fn sub(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -
 // sub_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn sub_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::TensorsAndShape(ids, _) = saved {
         let a_shape = store.shape(ids[0]).to_vec();
@@ -609,7 +609,7 @@ pub fn sub_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStor
 // neg
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn neg(a: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let data: Vec<f32> = store.to_host(a).iter().map(|x| -x).collect();
     let shape = store.shape(a).to_vec();
@@ -649,7 +649,7 @@ pub fn neg(a: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
 // neg_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn neg_backward(grad: TensorId, _saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     let data: Vec<f32> = store.to_host(grad).iter().map(|x| -x).collect();
     let shape = store.shape(grad).to_vec();
@@ -680,7 +680,7 @@ pub fn neg_backward(grad: TensorId, _saved: &SavedContext, store: &mut TensorSto
 // mul_scalar
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn mul_scalar(a: TensorId, s: f32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let data: Vec<f32> = store.to_host(a).iter().map(|x| x * s).collect();
     let shape = store.shape(a).to_vec();
@@ -721,7 +721,7 @@ pub fn mul_scalar(a: TensorId, s: f32, store: &mut TensorStore, tape: &mut Tape)
 // mul_scalar_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn mul_scalar_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::TensorAndScalar(_, s) = saved {
         let data: Vec<f32> = store.to_host(grad).iter().map(|x| x * s).collect();
@@ -757,7 +757,7 @@ pub fn mul_scalar_backward(grad: TensorId, saved: &SavedContext, store: &mut Ten
 // exp
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn exp(a: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let data: Vec<f32> = store.to_host(a).iter().map(|x| x.exp()).collect();
     let shape = store.shape(a).to_vec();
@@ -797,7 +797,7 @@ pub fn exp(a: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
 // exp_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn exp_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Tensor(out) = saved {
         let out_data = store.to_host(*out);
@@ -836,7 +836,7 @@ pub fn exp_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStor
 // log
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn log(a: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let data: Vec<f32> = store.to_host(a).iter().map(|x| x.ln()).collect();
     let shape = store.shape(a).to_vec();
@@ -876,7 +876,7 @@ pub fn log(a: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
 // log_backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn log_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Tensor(inp) = saved {
         let inp_data = store.to_host(*inp);
@@ -906,6 +906,497 @@ pub fn log_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStor
                 .arg(&(n as i32))
                 .launch(launch_cfg(n as u32))
                 .unwrap();
+        }
+        vec![Some(result)]
+    } else { vec![None] }
+}
+
+// =========================================================================
+// div
+// =========================================================================
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn div(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
+    let (data, shape) = broadcast_binary(a, b, store, |x, y| x / y);
+    let out = store.from_vec(data, &shape);
+    tape.record(TapeEntry {
+        op: BackwardOp::Div, output_id: out, input_ids: smallvec![a, b],
+        saved: SavedContext::Tensors(smallvec![a, b]),
+    });
+    out
+}
+
+#[cfg(feature = "cuda")]
+pub fn div(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
+    let a_shape = store.shape(a).to_vec();
+    let b_shape = store.shape(b).to_vec();
+    if a_shape == b_shape {
+        let n = shape_size(&a_shape);
+        let out = store.zeros(&a_shape);
+        let dev = GpuDevice::instance();
+        let func = dev.get_func("div_f32");
+        unsafe {
+            dev.stream.launch_builder(func)
+                .arg(&store.dev_ptr(out))
+                .arg(&store.dev_ptr(a))
+                .arg(&store.dev_ptr(b))
+                .arg(&(n as i32))
+                .launch(launch_cfg(n as u32))
+                .unwrap();
+        }
+        tape.record(TapeEntry {
+            op: BackwardOp::Div, output_id: out, input_ids: smallvec![a, b],
+            saved: SavedContext::Tensors(smallvec![a, b]),
+        });
+        out
+    } else {
+        let out_shape = broadcast_shape(&a_shape, &b_shape);
+        let a_data = store.to_host(a);
+        let b_data = store.to_host(b);
+        let out_size = shape_size(&out_shape);
+        let out_strides = compute_strides(&out_shape);
+        let a_strides = compute_strides(&a_shape);
+        let b_strides = compute_strides(&b_shape);
+        let ndim = out_shape.len();
+        let a_off = ndim - a_shape.len();
+        let b_off = ndim - b_shape.len();
+        let mut data = vec![0.0f32; out_size];
+        for i in 0..out_size {
+            let coord = to_coord(i, &out_shape, &out_strides);
+            let mut ai = 0;
+            for d in 0..a_shape.len() {
+                let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                ai += c * a_strides[d];
+            }
+            let mut bi = 0;
+            for d in 0..b_shape.len() {
+                let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                bi += c * b_strides[d];
+            }
+            data[i] = a_data[ai] / b_data[bi];
+        }
+        let out = store.from_vec(data, &out_shape);
+        tape.record(TapeEntry {
+            op: BackwardOp::Div, output_id: out, input_ids: smallvec![a, b],
+            saved: SavedContext::Tensors(smallvec![a, b]),
+        });
+        out
+    }
+}
+
+// =========================================================================
+// div_backward: da = grad/b, db = -grad*a/b^2
+// =========================================================================
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn div_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
+    if let SavedContext::Tensors(ids) = saved {
+        let a_data = store.to_host(ids[0]);
+        let b_data = store.to_host(ids[1]);
+        let grad_data = store.to_host(grad);
+        let a_shape = store.shape(ids[0]).to_vec();
+        let b_shape = store.shape(ids[1]).to_vec();
+        let grad_shape = store.shape(grad).to_vec();
+        let grad_size = shape_size(&grad_shape);
+        let out_strides = compute_strides(&grad_shape);
+        let ndim = grad_shape.len();
+        let a_strides_o = compute_strides(&a_shape);
+        let b_strides_o = compute_strides(&b_shape);
+        let a_off = ndim - a_shape.len();
+        let b_off = ndim - b_shape.len();
+
+        let mut ga_full = vec![0.0f32; grad_size];
+        let mut gb_full = vec![0.0f32; grad_size];
+        for i in 0..grad_size {
+            let coord = to_coord(i, &grad_shape, &out_strides);
+            let mut ai = 0;
+            for d in 0..a_shape.len() {
+                let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                ai += c * a_strides_o[d];
+            }
+            let mut bi = 0;
+            for d in 0..b_shape.len() {
+                let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                bi += c * b_strides_o[d];
+            }
+            ga_full[i] = grad_data[i] / b_data[bi];
+            gb_full[i] = -grad_data[i] * a_data[ai] / (b_data[bi] * b_data[bi]);
+        }
+        let ga = unbroadcast(&ga_full, &grad_shape, &a_shape);
+        let gb = unbroadcast(&gb_full, &grad_shape, &b_shape);
+        vec![Some(store.from_vec(ga, &a_shape)), Some(store.from_vec(gb, &b_shape))]
+    } else { vec![None, None] }
+}
+
+#[cfg(feature = "cuda")]
+pub fn div_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
+    if let SavedContext::Tensors(ids) = saved {
+        let a_shape = store.shape(ids[0]).to_vec();
+        let b_shape = store.shape(ids[1]).to_vec();
+        let grad_shape = store.shape(grad).to_vec();
+        if a_shape == b_shape && a_shape == grad_shape {
+            let n = shape_size(&grad_shape);
+            let ga = store.zeros(&a_shape);
+            let gb = store.zeros(&b_shape);
+            let dev = GpuDevice::instance();
+            unsafe {
+                dev.stream.launch_builder(dev.get_func("div_backward_a_f32"))
+                    .arg(&store.dev_ptr(ga))
+                    .arg(&store.dev_ptr(grad))
+                    .arg(&store.dev_ptr(ids[1]))
+                    .arg(&(n as i32))
+                    .launch(launch_cfg(n as u32))
+                    .unwrap();
+                dev.stream.launch_builder(dev.get_func("div_backward_b_f32"))
+                    .arg(&store.dev_ptr(gb))
+                    .arg(&store.dev_ptr(grad))
+                    .arg(&store.dev_ptr(ids[0]))
+                    .arg(&store.dev_ptr(ids[1]))
+                    .arg(&(n as i32))
+                    .launch(launch_cfg(n as u32))
+                    .unwrap();
+            }
+            vec![Some(ga), Some(gb)]
+        } else {
+            let a_data = store.to_host(ids[0]);
+            let b_data = store.to_host(ids[1]);
+            let grad_data = store.to_host(grad);
+            let grad_size = shape_size(&grad_shape);
+            let out_strides = compute_strides(&grad_shape);
+            let ndim = grad_shape.len();
+            let a_strides_o = compute_strides(&a_shape);
+            let b_strides_o = compute_strides(&b_shape);
+            let a_off = ndim - a_shape.len();
+            let b_off = ndim - b_shape.len();
+            let mut ga_full = vec![0.0f32; grad_size];
+            let mut gb_full = vec![0.0f32; grad_size];
+            for i in 0..grad_size {
+                let coord = to_coord(i, &grad_shape, &out_strides);
+                let mut ai = 0;
+                for d in 0..a_shape.len() {
+                    let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                    ai += c * a_strides_o[d];
+                }
+                let mut bi = 0;
+                for d in 0..b_shape.len() {
+                    let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                    bi += c * b_strides_o[d];
+                }
+                ga_full[i] = grad_data[i] / b_data[bi];
+                gb_full[i] = -grad_data[i] * a_data[ai] / (b_data[bi] * b_data[bi]);
+            }
+            let ga = unbroadcast(&ga_full, &grad_shape, &a_shape);
+            let gb = unbroadcast(&gb_full, &grad_shape, &b_shape);
+            vec![Some(store.from_vec(ga, &a_shape)), Some(store.from_vec(gb, &b_shape))]
+        }
+    } else { vec![None, None] }
+}
+
+// =========================================================================
+// lt, eq, gt, is_close (no backward — comparison ops)
+// =========================================================================
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn lt(a: TensorId, b: TensorId, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let (data, shape) = broadcast_binary(a, b, store, |x, y| if x < y { 1.0 } else { 0.0 });
+    store.from_vec(data, &shape)
+}
+
+#[cfg(feature = "cuda")]
+pub fn lt(a: TensorId, b: TensorId, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let a_shape = store.shape(a).to_vec();
+    let b_shape = store.shape(b).to_vec();
+    if a_shape == b_shape {
+        let n = shape_size(&a_shape);
+        let out = store.zeros(&a_shape);
+        let dev = GpuDevice::instance();
+        unsafe {
+            dev.stream.launch_builder(dev.get_func("lt_f32"))
+                .arg(&store.dev_ptr(out)).arg(&store.dev_ptr(a)).arg(&store.dev_ptr(b))
+                .arg(&(n as i32)).launch(launch_cfg(n as u32)).unwrap();
+        }
+        out
+    } else {
+        let (data, shape) = {
+            let a_data = store.to_host(a);
+            let b_data = store.to_host(b);
+            let out_shape = broadcast_shape(&a_shape, &b_shape);
+            let out_size = shape_size(&out_shape);
+            let out_strides = compute_strides(&out_shape);
+            let a_strides = compute_strides(&a_shape);
+            let b_strides = compute_strides(&b_shape);
+            let ndim = out_shape.len();
+            let a_off = ndim - a_shape.len();
+            let b_off = ndim - b_shape.len();
+            let mut data = vec![0.0f32; out_size];
+            for i in 0..out_size {
+                let coord = to_coord(i, &out_shape, &out_strides);
+                let mut ai = 0;
+                for d in 0..a_shape.len() {
+                    let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                    ai += c * a_strides[d];
+                }
+                let mut bi = 0;
+                for d in 0..b_shape.len() {
+                    let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                    bi += c * b_strides[d];
+                }
+                data[i] = if a_data[ai] < b_data[bi] { 1.0 } else { 0.0 };
+            }
+            (data, out_shape)
+        };
+        store.from_vec(data, &shape)
+    }
+}
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn eq_op(a: TensorId, b: TensorId, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let (data, shape) = broadcast_binary(a, b, store, |x, y| if (x - y).abs() < 1e-6 { 1.0 } else { 0.0 });
+    store.from_vec(data, &shape)
+}
+
+#[cfg(feature = "cuda")]
+pub fn eq_op(a: TensorId, b: TensorId, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let a_shape = store.shape(a).to_vec();
+    let b_shape = store.shape(b).to_vec();
+    if a_shape == b_shape {
+        let n = shape_size(&a_shape);
+        let out = store.zeros(&a_shape);
+        let dev = GpuDevice::instance();
+        unsafe {
+            dev.stream.launch_builder(dev.get_func("eq_f32"))
+                .arg(&store.dev_ptr(out)).arg(&store.dev_ptr(a)).arg(&store.dev_ptr(b))
+                .arg(&(n as i32)).launch(launch_cfg(n as u32)).unwrap();
+        }
+        out
+    } else {
+        let (data, shape) = {
+            let a_data = store.to_host(a);
+            let b_data = store.to_host(b);
+            let out_shape = broadcast_shape(&a_shape, &b_shape);
+            let out_size = shape_size(&out_shape);
+            let out_strides = compute_strides(&out_shape);
+            let a_strides = compute_strides(&a_shape);
+            let b_strides = compute_strides(&b_shape);
+            let ndim = out_shape.len();
+            let a_off = ndim - a_shape.len();
+            let b_off = ndim - b_shape.len();
+            let mut data = vec![0.0f32; out_size];
+            for i in 0..out_size {
+                let coord = to_coord(i, &out_shape, &out_strides);
+                let mut ai = 0;
+                for d in 0..a_shape.len() {
+                    let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                    ai += c * a_strides[d];
+                }
+                let mut bi = 0;
+                for d in 0..b_shape.len() {
+                    let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                    bi += c * b_strides[d];
+                }
+                data[i] = if (a_data[ai] - b_data[bi]).abs() < 1e-6 { 1.0 } else { 0.0 };
+            }
+            (data, out_shape)
+        };
+        store.from_vec(data, &shape)
+    }
+}
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn gt(a: TensorId, b: TensorId, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let (data, shape) = broadcast_binary(a, b, store, |x, y| if x > y { 1.0 } else { 0.0 });
+    store.from_vec(data, &shape)
+}
+
+#[cfg(feature = "cuda")]
+pub fn gt(a: TensorId, b: TensorId, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let a_shape = store.shape(a).to_vec();
+    let b_shape = store.shape(b).to_vec();
+    if a_shape == b_shape {
+        let n = shape_size(&a_shape);
+        let out = store.zeros(&a_shape);
+        let dev = GpuDevice::instance();
+        unsafe {
+            dev.stream.launch_builder(dev.get_func("gt_f32"))
+                .arg(&store.dev_ptr(out)).arg(&store.dev_ptr(a)).arg(&store.dev_ptr(b))
+                .arg(&(n as i32)).launch(launch_cfg(n as u32)).unwrap();
+        }
+        out
+    } else {
+        let (data, shape) = {
+            let a_data = store.to_host(a);
+            let b_data = store.to_host(b);
+            let out_shape = broadcast_shape(&a_shape, &b_shape);
+            let out_size = shape_size(&out_shape);
+            let out_strides = compute_strides(&out_shape);
+            let a_strides = compute_strides(&a_shape);
+            let b_strides = compute_strides(&b_shape);
+            let ndim = out_shape.len();
+            let a_off = ndim - a_shape.len();
+            let b_off = ndim - b_shape.len();
+            let mut data = vec![0.0f32; out_size];
+            for i in 0..out_size {
+                let coord = to_coord(i, &out_shape, &out_strides);
+                let mut ai = 0;
+                for d in 0..a_shape.len() {
+                    let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                    ai += c * a_strides[d];
+                }
+                let mut bi = 0;
+                for d in 0..b_shape.len() {
+                    let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                    bi += c * b_strides[d];
+                }
+                data[i] = if a_data[ai] > b_data[bi] { 1.0 } else { 0.0 };
+            }
+            (data, out_shape)
+        };
+        store.from_vec(data, &shape)
+    }
+}
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn is_close(a: TensorId, b: TensorId, tol: f32, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let a_shape = store.shape(a).to_vec();
+    let b_shape = store.shape(b).to_vec();
+    let out_shape = broadcast_shape(&a_shape, &b_shape);
+    let out_size = shape_size(&out_shape);
+    let out_strides = compute_strides(&out_shape);
+    let a_data = store.to_host(a);
+    let b_data = store.to_host(b);
+    let a_strides = compute_strides(&a_shape);
+    let b_strides = compute_strides(&b_shape);
+    let ndim = out_shape.len();
+    let a_off = ndim - a_shape.len();
+    let b_off = ndim - b_shape.len();
+    let mut data = vec![0.0f32; out_size];
+    for i in 0..out_size {
+        let coord = to_coord(i, &out_shape, &out_strides);
+        let mut ai = 0;
+        for d in 0..a_shape.len() {
+            let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+            ai += c * a_strides[d];
+        }
+        let mut bi = 0;
+        for d in 0..b_shape.len() {
+            let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+            bi += c * b_strides[d];
+        }
+        data[i] = if (a_data[ai] - b_data[bi]).abs() < tol { 1.0 } else { 0.0 };
+    }
+    store.from_vec(data, &out_shape)
+}
+
+#[cfg(feature = "cuda")]
+pub fn is_close(a: TensorId, b: TensorId, tol: f32, store: &mut TensorStore, _tape: &mut Tape) -> TensorId {
+    let a_shape = store.shape(a).to_vec();
+    let b_shape = store.shape(b).to_vec();
+    if a_shape == b_shape {
+        let n = shape_size(&a_shape);
+        let out = store.zeros(&a_shape);
+        let dev = GpuDevice::instance();
+        unsafe {
+            dev.stream.launch_builder(dev.get_func("is_close_f32"))
+                .arg(&store.dev_ptr(out)).arg(&store.dev_ptr(a)).arg(&store.dev_ptr(b))
+                .arg(&tol).arg(&(n as i32)).launch(launch_cfg(n as u32)).unwrap();
+        }
+        out
+    } else {
+        let (data, shape) = {
+            let a_data = store.to_host(a);
+            let b_data = store.to_host(b);
+            let out_shape = broadcast_shape(&a_shape, &b_shape);
+            let out_size = shape_size(&out_shape);
+            let out_strides = compute_strides(&out_shape);
+            let a_strides = compute_strides(&a_shape);
+            let b_strides = compute_strides(&b_shape);
+            let ndim = out_shape.len();
+            let a_off = ndim - a_shape.len();
+            let b_off = ndim - b_shape.len();
+            let mut data = vec![0.0f32; out_size];
+            for i in 0..out_size {
+                let coord = to_coord(i, &out_shape, &out_strides);
+                let mut ai = 0;
+                for d in 0..a_shape.len() {
+                    let c = if a_shape[d] == 1 { 0 } else { coord[d + a_off] };
+                    ai += c * a_strides[d];
+                }
+                let mut bi = 0;
+                for d in 0..b_shape.len() {
+                    let c = if b_shape[d] == 1 { 0 } else { coord[d + b_off] };
+                    bi += c * b_strides[d];
+                }
+                data[i] = if (a_data[ai] - b_data[bi]).abs() < tol { 1.0 } else { 0.0 };
+            }
+            (data, out_shape)
+        };
+        store.from_vec(data, &shape)
+    }
+}
+
+// =========================================================================
+// pow (scalar exponent)
+// =========================================================================
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn pow(a: TensorId, exponent: f32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
+    let data: Vec<f32> = store.to_host(a).iter().map(|x| x.powf(exponent)).collect();
+    let shape = store.shape(a).to_vec();
+    let out = store.from_vec(data, &shape);
+    tape.record(TapeEntry {
+        op: BackwardOp::Pow, output_id: out, input_ids: smallvec![a],
+        saved: SavedContext::ScalarAndTensor(exponent, a),
+    });
+    out
+}
+
+#[cfg(feature = "cuda")]
+pub fn pow(a: TensorId, exponent: f32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
+    let shape = store.shape(a).to_vec();
+    let n = shape_size(&shape);
+    let out = store.zeros(&shape);
+    let dev = GpuDevice::instance();
+    unsafe {
+        dev.stream.launch_builder(dev.get_func("pow_f32"))
+            .arg(&store.dev_ptr(out)).arg(&store.dev_ptr(a)).arg(&exponent)
+            .arg(&(n as i32)).launch(launch_cfg(n as u32)).unwrap();
+    }
+    tape.record(TapeEntry {
+        op: BackwardOp::Pow, output_id: out, input_ids: smallvec![a],
+        saved: SavedContext::ScalarAndTensor(exponent, a),
+    });
+    out
+}
+
+// =========================================================================
+// pow_backward: dx = grad * exponent * x^(exponent-1)
+// =========================================================================
+
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
+pub fn pow_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
+    if let SavedContext::ScalarAndTensor(exp, inp) = saved {
+        let inp_data = store.to_host(*inp);
+        let grad_data = store.to_host(grad);
+        let data: Vec<f32> = grad_data.iter().zip(&inp_data)
+            .map(|(g, x)| g * exp * x.powf(exp - 1.0))
+            .collect();
+        let shape = store.shape(grad).to_vec();
+        vec![Some(store.from_vec(data, &shape))]
+    } else { vec![None] }
+}
+
+#[cfg(feature = "cuda")]
+pub fn pow_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
+    if let SavedContext::ScalarAndTensor(exp, inp) = saved {
+        let shape = store.shape(grad).to_vec();
+        let n = shape_size(&shape);
+        let result = store.zeros(&shape);
+        let dev = GpuDevice::instance();
+        unsafe {
+            dev.stream.launch_builder(dev.get_func("pow_backward_f32"))
+                .arg(&store.dev_ptr(result)).arg(&store.dev_ptr(grad))
+                .arg(&store.dev_ptr(*inp)).arg(exp)
+                .arg(&(n as i32)).launch(launch_cfg(n as u32)).unwrap();
         }
         vec![Some(result)]
     } else { vec![None] }

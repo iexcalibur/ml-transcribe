@@ -10,7 +10,7 @@ fn resolve_dim(dim: i32, ndim: usize) -> usize {
 // Sum forward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn sum(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let a_shape = store.shape(a).to_vec();
     let d = resolve_dim(dim, a_shape.len());
@@ -91,7 +91,7 @@ pub fn sum(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> T
 // Sum backward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn sum_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::TensorAndShape(_, orig_shape) = saved {
         let grad_data = store.to_host(grad);
@@ -166,7 +166,7 @@ pub fn sum_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStor
 // Mean forward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn mean(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let a_shape = store.shape(a).to_vec();
     let d = resolve_dim(dim, a_shape.len());
@@ -229,7 +229,7 @@ pub fn mean(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> 
 // Mean backward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn mean_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::TensorAndShape(_, orig_shape) = saved {
         let grad_data = store.to_host(grad);
@@ -330,7 +330,7 @@ pub fn mean_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorSto
 // Max forward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn max(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let a_shape = store.shape(a).to_vec();
     let d = resolve_dim(dim, a_shape.len());
@@ -413,7 +413,7 @@ pub fn max(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> T
 // Max backward (CPU fallback for both features since it needs element comparison)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn max_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Tensors(ids) = saved {
         let inp = ids[0]; let max_out = ids[1];

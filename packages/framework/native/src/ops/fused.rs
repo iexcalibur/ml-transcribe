@@ -20,7 +20,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 // Fused residual + LayerNorm: out = LN(x + residual)
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn residual_layernorm(
     x: TensorId, residual: TensorId,
     gamma: TensorId, beta: TensorId, eps: f32,
@@ -134,7 +134,7 @@ pub fn residual_layernorm(
 
 // Backward reuses the standard layernorm backward, producing grads for
 // x and residual (both receive the same dx), plus dgamma and dbeta.
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn residual_layernorm_backward(
     grad: TensorId, saved: &SavedContext, store: &mut TensorStore,
 ) -> Vec<Option<TensorId>> {
@@ -247,7 +247,7 @@ pub fn residual_layernorm_backward(
 // Fused bias + GELU: out = gelu(x + bias)
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn bias_gelu(
     x: TensorId, bias: TensorId,
     store: &mut TensorStore, tape: &mut Tape,
@@ -313,7 +313,7 @@ pub fn bias_gelu(
     out_id
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn bias_gelu_backward(
     grad: TensorId, saved: &SavedContext, store: &mut TensorStore,
 ) -> Vec<Option<TensorId>> {

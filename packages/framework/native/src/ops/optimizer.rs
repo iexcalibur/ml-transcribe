@@ -18,7 +18,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 // AdamW step
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn adamw_step(
     param_ids: &[TensorId],
     lr: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32,
@@ -123,7 +123,7 @@ pub fn adamw_step(
 // Gradient norm
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn grad_norm(param_ids: &[TensorId], store: &TensorStore) -> f32 {
     let mut norm_sq = 0.0f64;
     for &pid in param_ids {
@@ -177,7 +177,7 @@ pub fn grad_norm(param_ids: &[TensorId], store: &TensorStore) -> f32 {
 // Gradient clipping
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn clip_grad_norm(param_ids: &[TensorId], max_norm: f32, store: &mut TensorStore) {
     let norm = grad_norm(param_ids, store);
     if norm > max_norm {
@@ -221,7 +221,7 @@ pub fn clip_grad_norm(param_ids: &[TensorId], max_norm: f32, store: &mut TensorS
 // Fused clip + AdamW step (single N-API call, avoids JS round-trips)
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn clip_and_step(
     param_ids: &[TensorId],
     lr: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32,

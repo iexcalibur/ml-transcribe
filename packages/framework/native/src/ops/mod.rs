@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod attention;
+pub mod conv;
 pub mod data;
 pub mod dropout;
 pub mod elementwise;
@@ -11,4 +12,5 @@ pub mod matmul;
 pub mod mixed_precision;
 pub mod norm;
 pub mod optimizer;
+pub mod pooling;
 pub mod reduce;

@@ -21,7 +21,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 // Forward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn cross_entropy(
     logits: TensorId, targets: &[usize],
     store: &mut TensorStore, tape: &mut Tape,
@@ -128,7 +128,7 @@ pub fn cross_entropy(
 // Backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn cross_entropy_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Indices(targets, n, v, sm_id) = saved {
         let grad_val = store.get_scalar(grad);
@@ -186,7 +186,7 @@ pub fn cross_entropy_backward(grad: TensorId, saved: &SavedContext, store: &mut 
 // GPU-index cross entropy (targets already on GPU via IntStore, zero PCIe)
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn cross_entropy_gpu(
     logits: TensorId, int_buf_id: usize,
     int_store: &IntStore, store: &mut TensorStore, tape: &mut Tape,
@@ -283,7 +283,7 @@ pub fn cross_entropy_gpu(
     loss_id
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn cross_entropy_backward_gpu(
     grad: TensorId, saved: &SavedContext,
     int_store: &IntStore, store: &mut TensorStore,

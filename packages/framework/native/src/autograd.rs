@@ -52,6 +52,13 @@ pub enum BackwardOp {
     ResidualLayerNorm,
     BiasGelu,
     Dropout,
+    Div,
+    Sigmoid,
+    Pow,
+    Conv1d,
+    Conv2d,
+    AvgPool2d,
+    MaxPool2d,
 }
 
 #[derive(Clone)]
@@ -204,5 +211,12 @@ fn dispatch_backward(
         BackwardOp::ResidualLayerNorm => ops::fused::residual_layernorm_backward(grad_id, &entry.saved, store),
         BackwardOp::BiasGelu => ops::fused::bias_gelu_backward(grad_id, &entry.saved, store),
         BackwardOp::Dropout => ops::dropout::dropout_backward(grad_id, &entry.saved, store),
+        BackwardOp::Div => ops::elementwise::div_backward(grad_id, &entry.saved, store),
+        BackwardOp::Sigmoid => ops::activation::sigmoid_backward(grad_id, &entry.saved, store),
+        BackwardOp::Pow => ops::elementwise::pow_backward(grad_id, &entry.saved, store),
+        BackwardOp::Conv1d => ops::conv::conv1d_backward(grad_id, &entry.saved, store),
+        BackwardOp::Conv2d => ops::conv::conv2d_backward(grad_id, &entry.saved, store),
+        BackwardOp::AvgPool2d => ops::pooling::avgpool2d_backward(grad_id, &entry.saved, store),
+        BackwardOp::MaxPool2d => ops::pooling::maxpool2d_backward(grad_id, &entry.saved, store),
     }
 }

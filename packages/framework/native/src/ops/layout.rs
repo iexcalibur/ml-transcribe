@@ -63,7 +63,7 @@ fn launch_permute(
 // View
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn view(a: TensorId, new_shape: &[usize], store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let orig_shape = store.shape(a).to_vec();
     let a_id = store.ensure_contiguous(a);
@@ -88,7 +88,7 @@ pub fn view(a: TensorId, new_shape: &[usize], store: &mut TensorStore, tape: &mu
     out
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn view_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Shape(orig_shape) = saved {
         let data = store.to_host(grad);
@@ -109,7 +109,7 @@ pub fn view_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorSto
 // =========================================================================
 
 /// CPU permute: share data buffer, just rearrange strides (creates non-contiguous view).
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn permute(a: TensorId, dims: &[usize], store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let a_shape = store.shape(a).to_vec();
     let a_strides = store.get(a).strides.clone();
@@ -159,7 +159,7 @@ pub fn permute(a: TensorId, dims: &[usize], store: &mut TensorStore, tape: &mut 
 // Permute backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn permute_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Permutation(order, orig_shape) = saved {
         let ndim = order.len();
@@ -234,7 +234,7 @@ pub fn contiguous_backward(grad: TensorId, _saved: &SavedContext, _store: &mut T
 // insert_raw helper — CPU only (used by CPU permute for non-contiguous views)
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 impl TensorStore {
     pub fn insert_raw(&mut self, data: Vec<f32>, shape: Vec<usize>, strides: Vec<usize>, size: usize) -> TensorId {
         use crate::tensor::GpuTensor;

@@ -11,7 +11,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 // Flash Attention forward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn flash_attention(
     q: TensorId, k: TensorId, v: TensorId,
     scale: f32, causal: bool,
@@ -139,7 +139,7 @@ pub fn flash_attention(
 // Flash Attention backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn flash_attention_backward(
     grad: TensorId, saved: &SavedContext, store: &mut TensorStore,
 ) -> Vec<Option<TensorId>> {

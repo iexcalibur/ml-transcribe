@@ -6,7 +6,7 @@ use crate::tensor::{TensorId, TensorStore, shape_size};
 // Softmax forward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn softmax(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let a_shape = store.shape(a).to_vec();
     let ndim = a_shape.len();
@@ -92,7 +92,7 @@ pub fn softmax(a: TensorId, dim: i32, store: &mut TensorStore, tape: &mut Tape) 
 // Softmax backward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn softmax_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::ScalarAndTensor(dim_f, sm_out) = saved {
         let d = *dim_f as usize;
@@ -164,7 +164,7 @@ pub fn softmax_backward(grad: TensorId, saved: &SavedContext, store: &mut Tensor
 // LayerNorm forward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn layernorm(
     x: TensorId, gamma: TensorId, beta: TensorId, eps: f32,
     store: &mut TensorStore, tape: &mut Tape,
@@ -270,7 +270,7 @@ pub fn layernorm(
 // LayerNorm backward
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn layernorm_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Tensors(ids) = saved {
         let x = ids[0]; let gamma = ids[1]; let mean_id = ids[2]; let rstd_id = ids[3];

@@ -15,7 +15,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 }
 
 /// Scale all gradients by inv_scale for GradScaler unscale step.
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn scale_grads(param_ids: &[TensorId], inv_scale: f32, store: &mut TensorStore) -> bool {
     let mut found_inf = false;
     for &pid in param_ids {

@@ -24,7 +24,7 @@ pub fn shape_size(shape: &[usize]) -> usize {
 // CPU tensor
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub struct GpuTensor {
     pub data: Vec<f32>,
     pub shape: Vec<usize>,
@@ -36,7 +36,7 @@ pub struct GpuTensor {
     pub adam_v: Option<Vec<f32>>,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 impl GpuTensor {
     pub fn is_contiguous(&self) -> bool {
         if self.shape.is_empty() {
@@ -156,7 +156,7 @@ impl TensorStore {
 // CPU-specific TensorStore methods
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 impl TensorStore {
     pub fn new() -> Self {
         Self {

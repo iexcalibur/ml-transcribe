@@ -26,6 +26,18 @@ void gelu_backward_f32(float* dx, const float* dy, const float* x, int n) {
 }
 
 extern "C" __global__
+void sigmoid_forward_f32(float* out, const float* x, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = 1.0f / (1.0f + expf(-x[i]));
+}
+
+extern "C" __global__
+void sigmoid_backward_f32(float* dx, const float* dy, const float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dx[i] = dy[i] * out[i] * (1.0f - out[i]);
+}
+
+extern "C" __global__
 void relu_forward_f32(float* out, const float* x, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = x[i] > 0.0f ? x[i] : 0.0f;

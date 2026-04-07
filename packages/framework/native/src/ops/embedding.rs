@@ -21,7 +21,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 // Forward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn embedding_forward(
     weight: TensorId, indices: &[usize], batch: usize, seq_len: usize,
     store: &mut TensorStore, tape: &mut Tape,
@@ -96,7 +96,7 @@ pub fn embedding_forward(
 // Backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn embedding_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Indices(indices, batch, seq_len, weight_id) = saved {
         let w_shape = store.shape(*weight_id).to_vec();
@@ -158,7 +158,7 @@ pub fn embedding_backward(grad: TensorId, saved: &SavedContext, store: &mut Tens
 // GPU-index forward (indices already on GPU via IntStore, zero PCIe)
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn embedding_forward_gpu(
     weight: TensorId, int_buf_id: usize, batch: usize, seq_len: usize,
     int_store: &IntStore, store: &mut TensorStore, tape: &mut Tape,
@@ -226,7 +226,7 @@ pub fn embedding_forward_gpu(
 // GPU-index backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn embedding_backward_gpu(
     grad: TensorId, saved: &SavedContext,
     int_store: &IntStore, store: &mut TensorStore,

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub struct CachingAllocator {
     free_lists: HashMap<usize, Vec<Vec<f32>>>,
     total_allocated: usize,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 impl CachingAllocator {
     pub fn new() -> Self {
         Self {

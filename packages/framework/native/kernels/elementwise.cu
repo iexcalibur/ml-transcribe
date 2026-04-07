@@ -95,6 +95,54 @@ void broadcast_mul_f32(float* out, const float* a, const float* b,
 }
 
 extern "C" __global__
+void lt_f32(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] < b[i] ? 1.0f : 0.0f;
+}
+
+extern "C" __global__
+void eq_f32(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (fabsf(a[i] - b[i]) < 1e-6f) ? 1.0f : 0.0f;
+}
+
+extern "C" __global__
+void gt_f32(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] > b[i] ? 1.0f : 0.0f;
+}
+
+extern "C" __global__
+void is_close_f32(float* out, const float* a, const float* b, float tol, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (fabsf(a[i] - b[i]) < tol) ? 1.0f : 0.0f;
+}
+
+extern "C" __global__
+void pow_f32(float* out, const float* a, float exponent, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = powf(a[i], exponent);
+}
+
+extern "C" __global__
+void pow_backward_f32(float* dx, const float* dy, const float* x, float exponent, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dx[i] = dy[i] * exponent * powf(x[i], exponent - 1.0f);
+}
+
+extern "C" __global__
+void div_backward_a_f32(float* da, const float* dy, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) da[i] = dy[i] / b[i];
+}
+
+extern "C" __global__
+void div_backward_b_f32(float* db, const float* dy, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) db[i] = -dy[i] * a[i] / (b[i] * b[i]);
+}
+
+extern "C" __global__
 void sum_reduce_all_f32(float* out, const float* inp, int n) {
     __shared__ float sdata[256];
     int tid = threadIdx.x;

@@ -133,6 +133,68 @@ export function logsoftmax(x: Tensor, dim: number = -1): Tensor {
 }
 
 // ============================================================
+// Conv modules
+// ============================================================
+
+export class Conv1d extends Module {
+    weight!: Parameter<Tensor>;
+    bias!: Parameter<Tensor>;
+    inChannels: number;
+    outChannels: number;
+    kernelSize: number;
+    stride: number;
+    padding: number;
+
+    constructor(inChannels: number, outChannels: number, kernelSize: number, stride: number = 1, padding: number = 0) {
+        super();
+        this.inChannels = inChannels;
+        this.outChannels = outChannels;
+        this.kernelSize = kernelSize;
+        this.stride = stride;
+        this.padding = padding;
+        const bound = 1 / Math.sqrt(inChannels * kernelSize);
+        this.weight = new Parameter(randRange([outChannels, inChannels, kernelSize], -bound, bound));
+        this.bias = new Parameter(randRange([outChannels], -bound, bound));
+    }
+
+    forward(input: Tensor): Tensor {
+        const out = input.conv1d(this.weight.value, this.stride, this.padding);
+        const [n, c, l] = out.shape;
+        const biasExpanded = this.bias.value.view(1, c, 1);
+        return out.add(biasExpanded);
+    }
+}
+
+export class Conv2d extends Module {
+    weight!: Parameter<Tensor>;
+    bias!: Parameter<Tensor>;
+    inChannels: number;
+    outChannels: number;
+    kernelSize: number;
+    stride: number;
+    padding: number;
+
+    constructor(inChannels: number, outChannels: number, kernelSize: number, stride: number = 1, padding: number = 0) {
+        super();
+        this.inChannels = inChannels;
+        this.outChannels = outChannels;
+        this.kernelSize = kernelSize;
+        this.stride = stride;
+        this.padding = padding;
+        const bound = 1 / Math.sqrt(inChannels * kernelSize * kernelSize);
+        this.weight = new Parameter(randRange([outChannels, inChannels, kernelSize, kernelSize], -bound, bound));
+        this.bias = new Parameter(randRange([outChannels], -bound, bound));
+    }
+
+    forward(input: Tensor): Tensor {
+        const out = input.conv2d(this.weight.value, this.stride, this.padding);
+        const [n, c, h, w] = out.shape;
+        const biasExpanded = this.bias.value.view(1, c, 1, 1);
+        return out.add(biasExpanded);
+    }
+}
+
+// ============================================================
 // Utility
 // ============================================================
 
@@ -149,16 +211,16 @@ export function randRange(shape: number[], min: number, max: number): Tensor {
     return t;
 }
 
-export function tile(_x: Tensor, _reps: number[]): Tensor {
-    throw new Error('tile not implemented in native backend');
+export function tile(x: Tensor, reps: number[]): Tensor {
+    return new Tensor(native.tile(x._id, reps));
 }
 
-export function avgpool2d(_x: Tensor, _kh: number, _kw: number): Tensor {
-    throw new Error('avgpool2d not implemented in native backend');
+export function avgpool2d(x: Tensor, kh: number, kw: number): Tensor {
+    return new Tensor(native.avgpool2D(x._id, kh, kw));
 }
 
-export function maxpool2d(_x: Tensor, _kh: number, _kw: number): Tensor {
-    throw new Error('maxpool2d not implemented in native backend');
+export function maxpool2d(x: Tensor, kh: number, kw: number): Tensor {
+    return new Tensor(native.maxpool2D(x._id, kh, kw));
 }
 
 export { Module, Parameter };

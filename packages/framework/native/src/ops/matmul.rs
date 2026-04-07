@@ -15,7 +15,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 /// CPU matmul supporting batched dimensions.
 /// A: [..., M, K], B: [..., K, N] → C: [..., M, N]
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn matmul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape) -> TensorId {
     let a_id = store.ensure_contiguous(a);
     let b_id = store.ensure_contiguous(b);
@@ -196,7 +196,7 @@ pub fn matmul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape
     out_id
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn matmul_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::Tensors(ids) = saved {
         let a = ids[0]; let b = ids[1];
@@ -255,7 +255,7 @@ pub fn matmul_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorS
 }
 
 /// Transpose the last two dimensions on CPU.
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 fn transpose_last2(a: TensorId, store: &mut TensorStore) -> TensorId {
     let shape = store.shape(a).to_vec();
     let ndim = shape.len();

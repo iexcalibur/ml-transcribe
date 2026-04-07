@@ -21,7 +21,7 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 // Forward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn dropout_forward(
     x: TensorId, rate: f32, training: bool,
     store: &mut TensorStore, tape: &mut Tape,
@@ -106,7 +106,7 @@ pub fn dropout_forward(
 // Backward
 // =========================================================================
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn dropout_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorStore) -> Vec<Option<TensorId>> {
     if let SavedContext::DropoutMask(mask_id, rate) = saved {
         let grad_data = store.to_host(grad);

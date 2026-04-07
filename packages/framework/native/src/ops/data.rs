@@ -9,7 +9,7 @@ use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 // GPU-resident dataset: tokenized data stored as i32 on device.
 // Avoids per-step PCIe transfers for training data.
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub struct IntBuffer {
     pub data: Vec<i32>,
     pub len: usize,
@@ -55,7 +55,7 @@ impl IntStore {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn create_dataset(data: &[i32], int_store: &mut IntStore) -> usize {
     let buf = IntBuffer {
         len: data.len(),
@@ -77,7 +77,7 @@ pub fn create_dataset(data: &[i32], int_store: &mut IntStore) -> usize {
 
 /// Sample a batch of (inputs, targets) windows from the dataset.
 /// Returns (inputs_int_id, targets_int_id) referencing IntStore buffers.
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn sample_batch(
     dataset_id: usize,
     block_size: usize,

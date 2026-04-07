@@ -167,26 +167,54 @@ export class Tensor {
     }
 
     sigmoid(): Tensor {
-        // sigmoid(x) = 1 / (1 + exp(-x))
-        const neg_x = this.neg();
-        const exp_neg = neg_x.exp();
-        const one_plus = exp_neg.add(1.0);
-        const one = Tensor.ones([1]);
-        return new Tensor(native.mul(one._id, one_plus._id)).log().neg().exp();
+        return new Tensor(native.sigmoid(this._id));
     }
 
     // ---- Reduction ----
 
-    sum(dim: number): Tensor {
+    sum(dim?: number): Tensor {
+        if (dim === undefined) return new Tensor(native.sumAll(this._id));
         return new Tensor(native.sumOp(this._id, dim));
     }
 
-    mean(dim: number): Tensor {
+    mean(dim?: number): Tensor {
+        if (dim === undefined) return new Tensor(native.meanAll(this._id));
         return new Tensor(native.meanOp(this._id, dim));
     }
 
     max(dim: number): Tensor {
         return new Tensor(native.maxOp(this._id, dim));
+    }
+
+    // ---- Comparison (returns 0.0/1.0 tensors, no gradient) ----
+
+    lt(other: Tensor): Tensor {
+        return new Tensor(native.lt(this._id, other._id));
+    }
+
+    eq(other: Tensor): Tensor {
+        return new Tensor(native.eqOp(this._id, other._id));
+    }
+
+    gt(other: Tensor): Tensor {
+        return new Tensor(native.gt(this._id, other._id));
+    }
+
+    isClose(other: Tensor, tol: number = 1e-5): Tensor {
+        return new Tensor(native.isClose(this._id, other._id, tol));
+    }
+
+    // ---- Elementwise ----
+
+    div(other: Tensor | number): Tensor {
+        if (typeof other === 'number') {
+            return this.mul(1.0 / other);
+        }
+        return new Tensor(native.div(this._id, other._id));
+    }
+
+    pow(exponent: number): Tensor {
+        return new Tensor(native.powOp(this._id, exponent));
     }
 
     // ---- Layout ----
@@ -209,16 +237,45 @@ export class Tensor {
         return new Tensor(native.matmul(this._id, other._id));
     }
 
+    // ---- Convolution ----
+
+    conv1d(weight: Tensor, stride: number = 1, padding: number = 0): Tensor {
+        return new Tensor(native.conv1DForward(this._id, weight._id, stride, padding));
+    }
+
+    conv2d(weight: Tensor, stride: number = 1, padding: number = 0): Tensor {
+        return new Tensor(native.conv2DForward(this._id, weight._id, stride, padding));
+    }
+
+    // ---- Utility ----
+
+    clone(): Tensor {
+        const data = this.toFloat32();
+        return Tensor.fromFloat32(new Float32Array(data), [...this._shape]);
+    }
+
+    detach(): Tensor {
+        const data = this.toFloat32();
+        return Tensor.fromFloat32(new Float32Array(data), [...this._shape]);
+    }
+
+    toString(): string {
+        const data = this.toFloat32();
+        const shapeStr = `[${this._shape.join(', ')}]`;
+        if (data.length <= 10) {
+            return `Tensor(${shapeStr}, [${Array.from(data).map(v => v.toFixed(4)).join(', ')}])`;
+        }
+        const first = Array.from(data.slice(0, 5)).map(v => v.toFixed(4)).join(', ');
+        const last = Array.from(data.slice(-3)).map(v => v.toFixed(4)).join(', ');
+        return `Tensor(${shapeStr}, [${first}, ..., ${last}])`;
+    }
+
     // ---- Parameter management ----
 
     setRequiresGrad(requires: boolean): Tensor {
         native.setRequiresGrad(this._id, requires);
         return this;
     }
-
-    // Conv stubs for API compat
-    conv1d(_weight: Tensor): Tensor { throw new Error('conv1d not implemented in native backend'); }
-    conv2d(_weight: Tensor): Tensor { throw new Error('conv2d not implemented in native backend'); }
 }
 
 export type TensorLike = number | Tensor;
