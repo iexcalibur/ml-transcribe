@@ -1,12 +1,20 @@
 {
   "name": "@mni-ml/framework-linux-arm64-gnu",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Linux ARM64 (glibc) native binary for @mni-ml/framework",
-  "os": ["linux"],
-  "cpu": ["arm64"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "main": "mni-framework-native.linux-arm64-gnu.node",
-  "files": ["mni-framework-native.linux-arm64-gnu.node"],
-  "libc": ["glibc"],
+  "files": [
+    "mni-framework-native.linux-arm64-gnu.node"
+  ],
+  "libc": [
+    "glibc"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
