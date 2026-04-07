@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/r-chong/TSTorch.git",
+    "url": "https://github.com/mni-ml/framework.git",
     "directory": "packages/framework"
   },
   "keywords": [
@@ -33,8 +33,16 @@
   "files": [
     "dist",
     "native/*.node",
+    "npm",
     "README.md"
   ],
+  "optionalDependencies": {
+    "@mni-ml/framework-darwin-arm64": "0.2.0",
+    "@mni-ml/framework-darwin-x64": "0.2.0",
+    "@mni-ml/framework-linux-x64-gnu": "0.2.0",
+    "@mni-ml/framework-linux-arm64-gnu": "0.2.0",
+    "@mni-ml/framework-win32-x64-msvc": "0.2.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3"
@@ -44,6 +52,7 @@
     "build:native": "cd native && cargo build --release --features cpu && cp target/release/libmni_framework_native.dylib mni-framework-native.darwin-arm64.node",
     "build:native:cuda": "cd native && cargo build --release --no-default-features --features cuda && cp target/release/libmni_framework_native.so mni-framework-native.linux-x64-gnu.node",
     "build:native:webgpu": "cd native && cargo build --release --no-default-features --features webgpu && cp target/release/libmni_framework_native.dylib mni-framework-native.darwin-arm64.node",
-    "build:all": "npm run build:native && npm run build"
+    "build:all": "npm run build:native && npm run build",
+    "test": "node test/ops.test.js"
   }
 }

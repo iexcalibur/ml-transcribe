@@ -5,19 +5,36 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname_f = dirname(fileURLToPath(import.meta.url));
 
+const PLATFORM_PACKAGES: Record<string, string> = {
+    'darwin-arm64':    '@mni-ml/framework-darwin-arm64',
+    'darwin-x64':      '@mni-ml/framework-darwin-x64',
+    'linux-x64':       '@mni-ml/framework-linux-x64-gnu',
+    'linux-arm64':     '@mni-ml/framework-linux-arm64-gnu',
+    'win32-x64':       '@mni-ml/framework-win32-x64-msvc',
+};
+
 function loadNative() {
     const require = createRequire(import.meta.url);
     const platform = process.platform;
     const arch = process.arch;
-    let suffix: string;
-    if (platform === 'darwin' && arch === 'arm64') {
-        suffix = 'darwin-arm64';
-    } else if (platform === 'linux' && arch === 'x64') {
-        suffix = 'linux-x64-gnu';
-    } else {
-        suffix = `${platform}-${arch}`;
+    const key = `${platform}-${arch}`;
+
+    // 1. Try the prebuilt platform package (installed via optionalDependencies)
+    const pkgName = PLATFORM_PACKAGES[key];
+    if (pkgName) {
+        try { return require(pkgName); } catch {}
     }
-    const ext = platform === 'darwin' ? 'dylib' : 'so';
+
+    // 2. Fall back to a local .node file (dev builds / build-from-source)
+    const suffixMap: Record<string, string> = {
+        'darwin-arm64': 'darwin-arm64',
+        'darwin-x64':   'darwin-x64',
+        'linux-x64':    'linux-x64-gnu',
+        'linux-arm64':  'linux-arm64-gnu',
+        'win32-x64':    'win32-x64-msvc',
+    };
+    const suffix = suffixMap[key] ?? key;
+    const ext = platform === 'win32' ? 'dll' : platform === 'darwin' ? 'dylib' : 'so';
     const candidates = [
         join(__dirname_f, '..', 'native', `mni-framework-native.${suffix}.node`),
         join(__dirname_f, '..', 'native', 'target', 'release', `libmni_framework_native.${ext}`),
@@ -27,7 +44,13 @@ function loadNative() {
             return require(p);
         }
     }
-    throw new Error(`Native addon not found for ${platform}-${arch}. Tried: ${candidates.join(', ')}`);
+
+    const hint = pkgName
+        ? `\n  Install prebuilt: npm install ${pkgName}\n  Or build from source: cd native && cargo build --release`
+        : `\n  Build from source: cd native && cargo build --release`;
+    throw new Error(
+        `@mni-ml/framework: native addon not found for ${platform}-${arch}.${hint}`
+    );
 }
 
 export const native: any = loadNative();

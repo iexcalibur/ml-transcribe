@@ -6,6 +6,10 @@ dist/
 build/
 out/
 
+# Native addon binaries (built by CI or locally)
+*.node
+packages/framework/native/target/
+
 # TypeScript cache
 *.tsbuildinfo
 
