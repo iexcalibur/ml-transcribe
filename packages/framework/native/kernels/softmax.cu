@@ -1,4 +1,5 @@
 #define BLOCK_DIM 256
+#define NEG_INF __int_as_float(0xff800000)
 
 extern "C" __global__
 void softmax_forward_f32(float* out, const float* x, int outer, int dim_size, int inner) {
@@ -12,7 +13,7 @@ void softmax_forward_f32(float* out, const float* x, int outer, int dim_size, in
 
     __shared__ float sdata[BLOCK_DIM];
 
-    float local_max = -INFINITY;
+    float local_max = NEG_INF;
     for (int d = tid; d < dim_size; d += blockDim.x) {
         float v = x[(o * dim_size + d) * inner + j];
         if (v > local_max) local_max = v;
