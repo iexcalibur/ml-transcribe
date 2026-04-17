@@ -1,6 +1,7 @@
 # @mni-ml/framework
 
 A TypeScript ML framework with Rust native backends (CPU, CUDA, WebGPU) providing autograd, tensor operations, and neural network training at GPU speed.
+<img width="533" height="300" alt="Logo" src="https://github.com/user-attachments/assets/46171a73-8376-4342-95db-0a956e6b513c" />
 
 ## Features
 
