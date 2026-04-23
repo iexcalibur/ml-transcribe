@@ -260,13 +260,23 @@ public final class SafetensorsWeights {
 
     // MARK: - Saving (mostly for tests / debugging)
 
-    /// Serialize a set of `(name, Tensor)` pairs to `path`.
-    /// Throws `SafetensorsError.saveFailed` on I/O error.
-    /// Throws `SafetensorsError.cannotSaveBorrowedTensor` if any input
-    /// Tensor is a borrowed view — the caller should produce fresh
-    /// owned tensors (e.g. via a no-op op chain) before saving.
+    /// On-disk tensor dtype for `save(_:to:dtype:)`.
+    public enum Dtype {
+        /// F32 (single-precision, 4 bytes per element). Exact.
+        case f32
+        /// F16 (half-precision, 2 bytes per element). Halves file size;
+        /// loses precision for values that aren't exactly representable.
+        /// Matches how most HuggingFace transformer weights ship.
+        case f16
+    }
+
+    /// Serialize a set of `(name, Tensor)` pairs to `path` at the given
+    /// `dtype`. Tensors live as F32 in the store; for `.f16`, Rust
+    /// converts on the way out. Throws `SafetensorsError.saveFailed`
+    /// on I/O error.
     public static func save(_ tensors: [(name: String, tensor: Tensor)],
-                            to path: String) throws {
+                            to path: String,
+                            dtype: Dtype = .f32) throws {
         let plan = ml_engine_safetensors_save_open()!
         for (name, tensor) in tensors {
             let rc: Int32 = name.withCString { cstr in
@@ -278,8 +288,14 @@ public final class SafetensorsWeights {
         }
         let rc: Int32 = path.withCString { cstr in
             let bytes = UnsafeRawPointer(cstr).assumingMemoryBound(to: UInt8.self)
-            return ml_engine_safetensors_save_finish(
-                plan, bytes, UInt64(strlen(cstr)))
+            switch dtype {
+            case .f32:
+                return ml_engine_safetensors_save_finish(
+                    plan, bytes, UInt64(strlen(cstr)))
+            case .f16:
+                return ml_engine_safetensors_save_finish_f16(
+                    plan, bytes, UInt64(strlen(cstr)))
+            }
         }
         if rc != 0 { throw SafetensorsError.saveFailed(path: path) }
     }

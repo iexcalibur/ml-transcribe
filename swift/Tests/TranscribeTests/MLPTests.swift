@@ -13,12 +13,13 @@ final class MLPTests: XCTestCase {
     /// Save a set of Tensors (owned, freshly built) to a safetensors file.
     private func writeFixture(
         _ pairs: [(String, [Float], [Int])],
-        to path: String
+        to path: String,
+        dtype: SafetensorsWeights.Dtype = .f32
     ) throws {
         let tensors: [(String, Tensor)] = try pairs.map { (name, data, shape) in
             (name, try Tensor.from(data: data, shape: shape))
         }
-        try SafetensorsWeights.save(tensors, to: path)
+        try SafetensorsWeights.save(tensors, to: path, dtype: dtype)
     }
 
     // MARK: - Crafted identity network (exact correctness)
@@ -177,6 +178,106 @@ final class MLPTests: XCTestCase {
         // Determinism: same input should always give the same class.
         let again = try mlp.classify(input)
         XCTAssertEqual(predicted, again)
+    }
+
+    // MARK: - F16 weights
+
+    /// Round-tripping the identity network through F16 should behave
+    /// identically to F32 for these test inputs — all weight values
+    /// (0.0, 1.0) are exactly representable in F16.
+    func testIdentityNetworkF16() throws {
+        let path = tmp("identity_f16")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let I: [Float] = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+        let zeros4: [Float] = [0, 0, 0, 0]
+
+        try writeFixture([
+            ("fc1.weight", I,      [4, 4]),
+            ("fc1.bias",   zeros4, [1, 4]),
+            ("fc2.weight", I,      [4, 4]),
+            ("fc2.bias",   zeros4, [1, 4]),
+        ], to: path, dtype: .f16)
+
+        // Verify on-disk size is roughly half what F32 would have been.
+        // 4 tensors × 16 f16 elements × 2 bytes = 128 bytes of data,
+        // plus JSON header and 8-byte length prefix. The file should
+        // be measurably smaller than its F32 counterpart.
+        let f16Size = try FileManager.default
+            .attributesOfItem(atPath: path)[.size] as! Int
+
+        let f32Path = tmp("identity_f32_for_size_cmp")
+        defer { try? FileManager.default.removeItem(atPath: f32Path) }
+        try writeFixture([
+            ("fc1.weight", I,      [4, 4]),
+            ("fc1.bias",   zeros4, [1, 4]),
+            ("fc2.weight", I,      [4, 4]),
+            ("fc2.bias",   zeros4, [1, 4]),
+        ], to: f32Path, dtype: .f32)
+        let f32Size = try FileManager.default
+            .attributesOfItem(atPath: f32Path)[.size] as! Int
+        XCTAssertLessThan(f16Size, f32Size,
+            "F16 file (\(f16Size) bytes) should be smaller than F32 (\(f32Size) bytes)")
+
+        // The loaded model should classify the same as in F32.
+        let mlp = try MLP2(weights: try SafetensorsWeights(path: path))
+        XCTAssertEqual(try mlp.classify([10, 5, 3, 1]),   0)
+        XCTAssertEqual(try mlp.classify([0, 10, 0, 0]),   1)
+        XCTAssertEqual(try mlp.classify([2, 3, 7, 4]),    2)
+        XCTAssertEqual(try mlp.classify([1, 1, 1, 10]),   3)
+    }
+
+    /// F16 loses precision on non-integer values, but argmax is robust
+    /// to a small shift: a 128-hidden MLP with seeded weights classifies
+    /// the same input to the same class whether loaded from F16 or F32.
+    func testMNISTScaleF16MatchesF32() throws {
+        let f32Path = tmp("mnist_f32_cmp")
+        let f16Path = tmp("mnist_f16_cmp")
+        defer {
+            try? FileManager.default.removeItem(atPath: f32Path)
+            try? FileManager.default.removeItem(atPath: f16Path)
+        }
+
+        let inDim = 784, hiddenDim = 128, outDim = 10
+        var rng = SeededRNG(seed: 7)
+        let w1: [Float] = (0..<(inDim * hiddenDim)).map { _ in
+            Float.random(in: -0.1...0.1, using: &rng)
+        }
+        let b1: [Float] = (0..<hiddenDim).map { _ in
+            Float.random(in: -0.01...0.01, using: &rng)
+        }
+        let w2: [Float] = (0..<(hiddenDim * outDim)).map { _ in
+            Float.random(in: -0.1...0.1, using: &rng)
+        }
+        let b2: [Float] = (0..<outDim).map { _ in
+            Float.random(in: -0.01...0.01, using: &rng)
+        }
+
+        let pairs: [(String, [Float], [Int])] = [
+            ("fc1.weight", w1, [inDim, hiddenDim]),
+            ("fc1.bias",   b1, [1, hiddenDim]),
+            ("fc2.weight", w2, [hiddenDim, outDim]),
+            ("fc2.bias",   b2, [1, outDim]),
+        ]
+        try writeFixture(pairs, to: f32Path, dtype: .f32)
+        try writeFixture(pairs, to: f16Path, dtype: .f16)
+
+        let mlpF32 = try MLP2(weights: try SafetensorsWeights(path: f32Path))
+        let mlpF16 = try MLP2(weights: try SafetensorsWeights(path: f16Path))
+
+        // Same seeded inputs must classify to the same class under both
+        // precisions. Margin between top-1 and top-2 logits is large
+        // enough at this scale that f16 rounding doesn't flip argmax.
+        var rngInputs = SeededRNG(seed: 999)
+        for _ in 0..<20 {
+            let input: [Float] = (0..<784).map { _ in
+                Float.random(in: 0...1, using: &rngInputs)
+            }
+            let predictedF32 = try mlpF32.classify(input)
+            let predictedF16 = try mlpF16.classify(input)
+            XCTAssertEqual(predictedF16, predictedF32,
+                "F16 and F32 disagreed on a 784-dim input")
+        }
     }
 
     /// Shape validation surfaces a useful error when a weight is the

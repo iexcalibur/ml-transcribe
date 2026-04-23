@@ -79,6 +79,8 @@ int32_t   ml_engine_safetensors_save_add(SavePlan* p, const uint8_t* name, uint6
                                          uint32_t id);
 int32_t   ml_engine_safetensors_save_finish(SavePlan* p,
                                             const uint8_t* path, uint64_t path_len);
+int32_t   ml_engine_safetensors_save_finish_f16(SavePlan* p,
+                                                const uint8_t* path, uint64_t path_len);
 
 #ifdef __cplusplus
 }

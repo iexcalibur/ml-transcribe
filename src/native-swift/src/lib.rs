@@ -446,8 +446,9 @@ pub unsafe extern "C" fn ml_engine_safetensors_save_add(
     0
 }
 
-/// Write the plan to disk and free it. Returns 0 on success, -1 on any
-/// error (invalid plan, bad path, I/O). The plan is freed regardless.
+/// Write the plan to disk as F32 and free it. Returns 0 on success,
+/// -1 on any error (invalid plan, bad path, I/O). The plan is freed
+/// regardless.
 ///
 /// # Safety
 /// `plan` must be a live pointer from `save_open`. `path_ptr` must be
@@ -458,6 +459,32 @@ pub unsafe extern "C" fn ml_engine_safetensors_save_finish(
     path_ptr: *const u8,
     path_len: u64,
 ) -> i32 {
+    finish_plan(plan, path_ptr, path_len, /*as_f16=*/ false)
+}
+
+/// Write the plan to disk as F16 (converted from the F32 tensors in
+/// the store) and free the plan. Returns 0 on success, -1 on error.
+///
+/// Useful for producing realistic fp16 model files from tests without
+/// needing a Python round-trip.
+///
+/// # Safety
+/// Same as `ml_engine_safetensors_save_finish`.
+#[no_mangle]
+pub unsafe extern "C" fn ml_engine_safetensors_save_finish_f16(
+    plan: *mut SavePlan,
+    path_ptr: *const u8,
+    path_len: u64,
+) -> i32 {
+    finish_plan(plan, path_ptr, path_len, /*as_f16=*/ true)
+}
+
+unsafe fn finish_plan(
+    plan: *mut SavePlan,
+    path_ptr: *const u8,
+    path_len: u64,
+    as_f16: bool,
+) -> i32 {
     if plan.is_null() {
         return -1;
     }
@@ -466,7 +493,12 @@ pub unsafe extern "C" fn ml_engine_safetensors_save_finish(
         return -1;
     };
     let eng = engine().lock().unwrap();
-    match safetensors::save(&path, &plan.entries, &eng.store) {
+    let result = if as_f16 {
+        safetensors::save_as_f16(&path, &plan.entries, &eng.store)
+    } else {
+        safetensors::save(&path, &plan.entries, &eng.store)
+    };
+    match result {
         Ok(()) => 0,
         Err(_) => -1,
     }
