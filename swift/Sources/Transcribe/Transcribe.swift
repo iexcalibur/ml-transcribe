@@ -1,103 +1,123 @@
 import TranscribeFFIC
 
-/// Top-level namespace for simple value-returning helpers.
-///
-/// For stateful objects, see `Tensor`.
+/// Sanity-check namespace. Pure FFI helpers unrelated to the engine.
 public enum Transcribe {
-    /// FFI sanity check: `a + b` computed in Rust.
+    /// FFI smoke test: `a + b` computed in Rust.
     public static func add(_ a: Int32, _ b: Int32) -> Int32 {
         return ml_add(a, b)
     }
-
-    /// One-shot: allocates a zero tensor in Rust, sums it, drops it.
-    public static func tensorZerosSum(rows: UInt32, cols: UInt32) -> Float {
-        return ml_tensor_zeros_sum(rows, cols)
-    }
-
-    /// One-shot: allocates an iota tensor in Rust, sums it, drops it.
-    public static func tensorIotaSum(n: UInt32) -> Float {
-        return ml_tensor_iota_sum(n)
-    }
 }
 
-/// A handle to a Rust-owned tensor.
+// ---------------------------------------------------------------------------
+// Tensor
+// ---------------------------------------------------------------------------
+
+/// Errors surfaced by `Tensor` constructors.
+public enum TensorError: Error {
+    /// `data.count` did not match the product of `shape`.
+    case shapeMismatch(expected: Int, got: Int)
+    /// Rust returned the invalid-id sentinel for some other reason.
+    case engineError
+}
+
+/// A handle to a tensor owned by the Rust engine (`TensorStore`).
 ///
-/// This is a Swift `class` (reference type) so the `deinit` below fires
-/// exactly once, when the last Swift reference drops, and releases the
-/// underlying Rust allocation. A `struct` would be copied by value on
-/// assignment and each copy would try to free the same pointer — a
-/// classic double-free.
+/// Internally this is a single `UInt32` id. The Rust side owns the
+/// actual buffer. `deinit` calls `ml_engine_release` so the store can
+/// reclaim the slot. Must be a `class` (reference type) — a `struct`
+/// would double-release on copy.
 ///
-/// Threading: reads (`sum`, `numel`) are safe from multiple threads on
-/// the same Tensor; do not drop a Tensor on one thread while another
-/// thread is reading it. In practice: don't share a Tensor across
-/// threads unless you serialize access externally.
+/// Thread safety: the engine is protected by a Mutex on the Rust side,
+/// so individual calls are safe from multiple threads. Do not drop a
+/// `Tensor` on one thread while another is reading it.
 public final class Tensor {
-    /// Opaque pointer to the underlying Rust `Tensor`. Never dereferenced
-    /// in Swift — only passed back to C FFI functions.
-    private let handle: OpaquePointer
+    /// Rust-side `TensorId` (a `u32`). `UInt32.max` is reserved as an
+    /// error sentinel — we never construct a `Tensor` holding it.
+    private let id: UInt32
 
     // MARK: - Constructors
 
-    /// `rows x cols` tensor of zeros.
-    public static func zeros(rows: UInt32, cols: UInt32) -> Tensor {
-        // Because `MLTensor` is forward-declared (incomplete) in the C
-        // header, Swift imports `MLTensor*` as `OpaquePointer` — not
-        // `UnsafePointer<MLTensor>`. So constructors already return the
-        // right type and no cast is needed.
-        //
-        // `!` is safe here because our Rust constructor never returns null.
-        let handle = ml_tensor_zeros(rows, cols)!
-        return Tensor(handle: handle)
-    }
-
-    /// `n`-element iota tensor: [0.0, 1.0, ..., n-1].
-    public static func iota(_ n: UInt32) -> Tensor {
-        let handle = ml_tensor_iota(n)!
-        return Tensor(handle: handle)
-    }
-
-    /// Build a `rows x cols` tensor by copying a Swift array into Rust.
-    /// Returns `nil` if `data.count != rows * cols`.
-    public static func from(data: [Float], rows: UInt32, cols: UInt32) -> Tensor? {
-        guard data.count == Int(rows) * Int(cols) else { return nil }
-        // `withUnsafeBufferPointer` gives us a temporary C-compatible pointer
-        // to the array's storage. Rust copies out of it before we return;
-        // the pointer is not retained.
-        let maybeHandle: OpaquePointer? = data.withUnsafeBufferPointer { buf in
-            ml_tensor_from_data(buf.baseAddress, UInt64(buf.count), rows, cols)
+    /// Allocate a tensor of the given shape filled with zeros.
+    public static func zeros(shape: [Int]) -> Tensor {
+        let dims = shape.map { UInt64($0) }
+        let id = dims.withUnsafeBufferPointer { buf in
+            ml_engine_zeros(buf.baseAddress, UInt64(buf.count))
         }
-        guard let handle = maybeHandle else { return nil }
-        return Tensor(handle: handle)
+        precondition(id != UInt32.max, "engine returned invalid id for zeros")
+        return Tensor(id: id)
     }
 
-    private init(handle: OpaquePointer) {
-        self.handle = handle
+    /// Convenience for the common 2-D zeros case.
+    public static func zeros(rows: UInt32, cols: UInt32) -> Tensor {
+        return zeros(shape: [Int(rows), Int(cols)])
     }
 
-    // MARK: - Accessors
-
-    /// Sum of all elements.
-    public var sum: Float {
-        ml_tensor_sum(handle)
+    /// 1-D iota tensor: `[0.0, 1.0, ..., n-1]`.
+    public static func iota(_ n: UInt32) -> Tensor {
+        return Tensor(id: ml_engine_iota(n))
     }
+
+    /// Build a tensor of the given shape by copying `data` into Rust.
+    /// Throws `TensorError.shapeMismatch` if `data.count != product(shape)`.
+    public static func from(data: [Float], shape: [Int]) throws -> Tensor {
+        let expected = shape.reduce(1, *)
+        guard data.count == expected else {
+            throw TensorError.shapeMismatch(expected: expected, got: data.count)
+        }
+        let dims = shape.map { UInt64($0) }
+        let id: UInt32 = data.withUnsafeBufferPointer { dataBuf in
+            dims.withUnsafeBufferPointer { shapeBuf in
+                ml_engine_from_data(
+                    dataBuf.baseAddress,
+                    UInt64(dataBuf.count),
+                    shapeBuf.baseAddress,
+                    UInt64(shapeBuf.count)
+                )
+            }
+        }
+        guard id != UInt32.max else { throw TensorError.engineError }
+        return Tensor(id: id)
+    }
+
+    /// Convenience for the common 2-D `from(data:)` case.
+    public static func from(data: [Float], rows: UInt32, cols: UInt32) -> Tensor? {
+        return try? from(data: data, shape: [Int(rows), Int(cols)])
+    }
+
+    private init(id: UInt32) {
+        self.id = id
+    }
+
+    // MARK: - Shape / size
 
     /// Total number of elements (product of shape dims).
     public var numel: UInt64 {
-        ml_tensor_numel(handle)
+        ml_engine_numel(id)
+    }
+
+    /// Full shape as a Swift array.
+    public var shape: [Int] {
+        let ndim = Int(ml_engine_shape_len(id))
+        var dims = [UInt64](repeating: 0, count: ndim)
+        let written = dims.withUnsafeMutableBufferPointer { buf in
+            Int(ml_engine_shape_copy(id, buf.baseAddress, UInt64(ndim)))
+        }
+        return dims.prefix(written).map { Int($0) }
     }
 
     // MARK: - Data movement
 
+    /// Sum of all elements. Reads the buffer directly; no autograd.
+    public var sum: Float {
+        ml_engine_sum(id)
+    }
+
     /// Copy the tensor's row-major data into a fresh `[Float]`.
-    /// Safe (Swift owns the returned array) but O(numel) memory + copy.
-    /// For large tensors or hot paths, prefer `withUnsafeData`.
     public func toArray() -> [Float] {
         let count = Int(numel)
-        // Allocate uninitialized storage, then fill it via FFI.
         return [Float](unsafeUninitializedCapacity: count) { buffer, initializedCount in
-            let written = ml_tensor_copy_into(
-                handle,
+            let written = ml_engine_copy_into(
+                id,
                 buffer.baseAddress,
                 UInt64(count)
             )
@@ -105,24 +125,19 @@ public final class Tensor {
         }
     }
 
-    /// Zero-copy read access to the tensor's buffer.
-    ///
-    /// The closure receives a pointer that is valid ONLY for the
-    /// duration of the call. Do not store it, do not pass it to async
-    /// work, do not return anything that captures it.
-    ///
-    /// Typical use: read a few elements, compute a summary, return it.
-    public func withUnsafeData<R>(
-        _ body: (UnsafeBufferPointer<Float>) throws -> R
-    ) rethrows -> R {
-        let ptr = ml_tensor_data_ptr(handle)
-        let buffer = UnsafeBufferPointer(start: ptr, count: Int(numel))
-        return try body(buffer)
+    // MARK: - Ops
+
+    /// Matrix multiply: `self @ other`. Both operands must be 2-D with
+    /// compatible inner dims. Returns a new `Tensor` whose shape is
+    /// `[self.rows, other.cols]`.
+    public func matmul(_ other: Tensor) -> Tensor {
+        let resultId = ml_engine_matmul(self.id, other.id)
+        return Tensor(id: resultId)
     }
 
     // MARK: - Lifetime
 
     deinit {
-        ml_tensor_free(handle)
+        ml_engine_release(id)
     }
 }

@@ -3,7 +3,7 @@ import XCTest
 
 final class TranscribeTests: XCTestCase {
 
-    // MARK: - Value-returning helpers (Milestone 1 + 2a)
+    // MARK: - FFI sanity
 
     func testAddBridgesToRust() {
         XCTAssertEqual(Transcribe.add(2, 3), 5)
@@ -11,34 +11,23 @@ final class TranscribeTests: XCTestCase {
         XCTAssertEqual(Transcribe.add(0, 0), 0)
     }
 
-    func testTensorZerosSum() {
-        XCTAssertEqual(Transcribe.tensorZerosSum(rows: 3, cols: 4), 0.0)
-        XCTAssertEqual(Transcribe.tensorZerosSum(rows: 100, cols: 100), 0.0)
-    }
-
-    func testTensorIotaSum() {
-        XCTAssertEqual(Transcribe.tensorIotaSum(n: 10), 45.0)
-        XCTAssertEqual(Transcribe.tensorIotaSum(n: 100), 4950.0)
-    }
-
-    // MARK: - Handle-based Tensor (Milestone 2b)
+    // MARK: - Tensor construction
 
     func testTensorZerosHandle() {
         let t = Tensor.zeros(rows: 3, cols: 4)
         XCTAssertEqual(t.numel, 12)
         XCTAssertEqual(t.sum, 0.0)
-        // `t` is freed at end of scope via deinit.
+        XCTAssertEqual(t.shape, [3, 4])
     }
 
     func testTensorIotaHandle() {
         let t = Tensor.iota(10)
         XCTAssertEqual(t.numel, 10)
         XCTAssertEqual(t.sum, 45.0)
+        XCTAssertEqual(t.shape, [10])
     }
 
     func testMultipleIndependentTensors() {
-        // Each tensor owns its own Rust allocation; freeing one must not
-        // affect the others.
         let a = Tensor.zeros(rows: 2, cols: 3)
         let b = Tensor.iota(5)
         let c = Tensor.iota(100)
@@ -54,20 +43,17 @@ final class TranscribeTests: XCTestCase {
     }
 
     func testReferenceSemantics() {
-        // Two Swift references to the same underlying Rust tensor.
-        // Only one free() should fire — when both refs drop.
+        // Two Swift references share the same underlying Rust id; release
+        // must happen exactly once, when the last ref drops.
         let a = Tensor.iota(10)
-        let b = a  // reference copy, same handle
+        let b = a
         XCTAssertEqual(a.sum, 45.0)
         XCTAssertEqual(b.sum, 45.0)
-        // When this function returns, both `a` and `b` go out of scope,
-        // but ARC ensures deinit runs exactly once on the last release.
     }
 
     func testManyTensorsNoLeak() {
-        // Allocate and drop 10k tensors; if free is wired up correctly,
-        // memory is bounded. A leak would OOM under Instruments; here we
-        // just confirm we don't crash and the sums are consistent.
+        // 10k alloc/release cycles. The store recycles freed ids via its
+        // free_ids list, so memory should stay bounded.
         for _ in 0..<10_000 {
             let t = Tensor.iota(128)
             XCTAssertEqual(t.numel, 128)
@@ -75,23 +61,31 @@ final class TranscribeTests: XCTestCase {
         }
     }
 
-    // MARK: - Data movement (Milestone 3)
+    // MARK: - Data movement
 
-    func testFromDataRoundTrip() {
+    func testFromDataRoundTrip() throws {
         let source: [Float] = [1, 2, 3, 4, 5, 6]
-        guard let t = Tensor.from(data: source, rows: 2, cols: 3) else {
-            return XCTFail("from(data:) returned nil")
-        }
+        let t = try Tensor.from(data: source, shape: [2, 3])
         XCTAssertEqual(t.numel, 6)
         XCTAssertEqual(t.sum, 21.0)
-        // Swift -> Rust -> Swift should preserve every element exactly.
+        XCTAssertEqual(t.shape, [2, 3])
         XCTAssertEqual(t.toArray(), source)
     }
 
     func testFromDataRejectsShapeMismatch() {
-        // 5 elements can't fit a 2x3 shape.
-        let t = Tensor.from(data: [1, 2, 3, 4, 5], rows: 2, cols: 3)
-        XCTAssertNil(t, "Rust should reject size mismatch; Swift returns nil")
+        XCTAssertThrowsError(try Tensor.from(data: [1, 2, 3, 4, 5], shape: [2, 3])) { error in
+            guard case TensorError.shapeMismatch(let expected, let got) = error else {
+                return XCTFail("expected .shapeMismatch")
+            }
+            XCTAssertEqual(expected, 6)
+            XCTAssertEqual(got, 5)
+        }
+    }
+
+    func testFromDataConvenienceInit() {
+        // The non-throwing 2-D variant returns nil on mismatch.
+        XCTAssertNil(Tensor.from(data: [1, 2, 3, 4, 5], rows: 2, cols: 3))
+        XCTAssertNotNil(Tensor.from(data: [1, 2, 3, 4, 5, 6], rows: 2, cols: 3))
     }
 
     func testToArrayOnIota() {
@@ -104,35 +98,45 @@ final class TranscribeTests: XCTestCase {
         XCTAssertEqual(t.toArray(), Array(repeating: Float(0), count: 12))
     }
 
-    func testWithUnsafeDataBorrow() {
-        let t = Tensor.iota(100)
-        // Zero-copy max via the borrow API.
-        let maxValue = t.withUnsafeData { buffer in
-            buffer.max() ?? .nan
-        }
-        XCTAssertEqual(maxValue, 99.0)
-    }
-
-    func testWithUnsafeDataRethrows() {
-        // The closure-based borrow API rethrows errors from the body.
-        struct Boom: Error {}
-        let t = Tensor.iota(10)
-        XCTAssertThrowsError(
-            try t.withUnsafeData { _ in throw Boom() }
-        )
-        // After the throw, the tensor should still be usable (no leaks,
-        // no corrupted state).
-        XCTAssertEqual(t.sum, 45.0)
-    }
-
     func testRoundTripLargeBuffer() {
-        // 1M elements: verifies copy_into doesn't truncate and the
-        // unsafeUninitializedCapacity pattern respects initializedCount.
         let n: UInt32 = 1_000_000
         let t = Tensor.iota(n)
         let arr = t.toArray()
         XCTAssertEqual(arr.count, Int(n))
         XCTAssertEqual(arr.first, 0)
         XCTAssertEqual(arr.last, Float(n - 1))
+    }
+
+    // MARK: - Real ops
+
+    func testMatmul2x2() throws {
+        // [[1,2],[3,4]] @ [[5,6],[7,8]] = [[19,22],[43,50]]
+        let a = try Tensor.from(data: [1, 2, 3, 4], shape: [2, 2])
+        let b = try Tensor.from(data: [5, 6, 7, 8], shape: [2, 2])
+        let c = a.matmul(b)
+
+        XCTAssertEqual(c.shape, [2, 2])
+        XCTAssertEqual(c.numel, 4)
+        XCTAssertEqual(c.toArray(), [19, 22, 43, 50])
+    }
+
+    func testMatmul2x3_3x2() throws {
+        // [[1,2,3],[4,5,6]] (2x3) @ [[7,8],[9,10],[11,12]] (3x2)
+        // = [[1*7+2*9+3*11, 1*8+2*10+3*12], [4*7+5*9+6*11, 4*8+5*10+6*12]]
+        // = [[58, 64], [139, 154]]
+        let a = try Tensor.from(data: [1, 2, 3, 4, 5, 6], shape: [2, 3])
+        let b = try Tensor.from(data: [7, 8, 9, 10, 11, 12], shape: [3, 2])
+        let c = a.matmul(b)
+
+        XCTAssertEqual(c.shape, [2, 2])
+        XCTAssertEqual(c.toArray(), [58, 64, 139, 154])
+    }
+
+    func testMatmulIdentity() throws {
+        // A @ I = A (for any conforming A)
+        let a = try Tensor.from(data: [1, 2, 3, 4, 5, 6], shape: [2, 3])
+        let i = try Tensor.from(data: [1, 0, 0, 0, 1, 0, 0, 0, 1], shape: [3, 3])
+        let c = a.matmul(i)
+        XCTAssertEqual(c.toArray(), [1, 2, 3, 4, 5, 6])
     }
 }

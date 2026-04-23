@@ -8,49 +8,42 @@ extern "C" {
 #endif
 
 // ---------------------------------------------------------------------------
-// Simple value-returning helpers
+// Sanity check
 // ---------------------------------------------------------------------------
 
 int32_t ml_add(int32_t a, int32_t b);
 
-float ml_tensor_zeros_sum(uint32_t rows, uint32_t cols);
-float ml_tensor_iota_sum(uint32_t n);
-
 // ---------------------------------------------------------------------------
-// Opaque tensor handles
+// Engine-backed tensor API
 //
-// `MLTensor` is forward-declared and intentionally incomplete: callers may
-// only use `MLTensor*` and must never dereference or dig into the struct.
-// All operations go through the functions below.
+// All tensors live inside a process-global TensorStore in Rust, keyed by
+// a `uint32_t` id. The sentinel `0xFFFFFFFF` (UINT32_MAX) is returned
+// from constructors on error (null pointer, shape mismatch).
 //
-// Lifetime: the pointer returned by a constructor must be released exactly
-// once via `ml_tensor_free`. Passing a freed pointer to any function is
-// undefined behavior.
+// Lifetime: each id returned from a constructor must be passed back to
+// `ml_engine_release` exactly once. Calling release with an unknown id
+// is a no-op. The Swift `Tensor` class enforces single-release via
+// `deinit`.
 // ---------------------------------------------------------------------------
 
-typedef struct MLTensor MLTensor;
+uint32_t ml_engine_zeros(const uint64_t* shape, uint64_t shape_len);
+uint32_t ml_engine_iota(uint32_t n);
+uint32_t ml_engine_from_data(const float* data, uint64_t data_len,
+                             const uint64_t* shape, uint64_t shape_len);
 
-MLTensor* ml_tensor_zeros(uint32_t rows, uint32_t cols);
-MLTensor* ml_tensor_iota(uint32_t n);
+uint64_t ml_engine_numel(uint32_t id);
+uint64_t ml_engine_shape_len(uint32_t id);
+uint64_t ml_engine_shape_copy(uint32_t id, uint64_t* out, uint64_t out_len);
+float    ml_engine_sum(uint32_t id);
+uint64_t ml_engine_copy_into(uint32_t id, float* out, uint64_t out_len);
 
-// Copy caller-owned data into a new tensor. Returns NULL on size
-// mismatch (rows*cols != len) or null input.
-MLTensor* ml_tensor_from_data(const float* data, uint64_t len,
-                              uint32_t rows, uint32_t cols);
+void     ml_engine_release(uint32_t id);
 
-float ml_tensor_sum(const MLTensor* handle);
-uint64_t ml_tensor_numel(const MLTensor* handle);
+// ---------------------------------------------------------------------------
+// Ops
+// ---------------------------------------------------------------------------
 
-// Copy out: writes up to `out_len` elements into `out`, returns count.
-uint64_t ml_tensor_copy_into(const MLTensor* handle,
-                             float* out, uint64_t out_len);
-
-// Borrow: returns a read-only pointer to the tensor's internal buffer.
-// Valid only until the tensor is freed. DO NOT retain across calls that
-// could mutate or free the tensor.
-const float* ml_tensor_data_ptr(const MLTensor* handle);
-
-void ml_tensor_free(MLTensor* handle);
+uint32_t ml_engine_matmul(uint32_t a, uint32_t b);
 
 #ifdef __cplusplus
 }
