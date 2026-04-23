@@ -1,0 +1,16 @@
+[package]
+name = "ml_transcribe_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# staticlib = a .a archive that Swift/Xcode can link into an app
+# (vs cdylib which is a .dylib/.so/.dll like the Node crate uses)
+crate-type = ["staticlib"]
+
+[dependencies]
+mni_framework_core = { path = "../native-core" }
+
+[profile.release]
+lto = true
+opt-level = 3

@@ -1,0 +1,4 @@
+module TranscribeFFIC {
+    header "transcribe_ffi.h"
+    export *
+}

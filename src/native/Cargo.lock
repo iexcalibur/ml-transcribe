@@ -517,11 +517,19 @@ dependencies = [
 name = "mni-framework-native"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
- "cudarc",
+ "mni_framework_core",
  "napi",
  "napi-build",
  "napi-derive",
+ "parking_lot",
+]
+
+[[package]]
+name = "mni_framework_core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "cudarc",
  "parking_lot",
  "pollster",
  "rand",

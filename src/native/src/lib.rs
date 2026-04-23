@@ -1,20 +1,16 @@
-mod allocator;
-mod autograd;
-mod device;
-mod ops;
-mod tensor;
-mod utils;
-
+// All portable logic lives in the `mni_framework_core` crate; this file
+// is only the N-API glue that wraps it for Node.
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::autograd::Tape;
-use crate::ops::data::IntStore;
-use crate::ops::kv_cache::{KvCache, KvCacheConfig};
-use crate::tensor::{TensorId, TensorStore};
+use mni_framework_core::autograd::Tape;
+use mni_framework_core::ops;
+use mni_framework_core::ops::data::IntStore;
+use mni_framework_core::ops::kv_cache::{KvCache, KvCacheConfig};
+use mni_framework_core::tensor::{TensorId, TensorStore};
 
 struct Engine {
     store: TensorStore,
@@ -693,14 +689,7 @@ pub fn cross_entropy_loss_gpu(logits: u32, int_buf_id: u32) -> u32 {
 #[napi]
 pub fn gc_tensors(keep_ids: Vec<u32>) {
     let mut eng = engine().lock();
-    let keep: std::collections::HashSet<usize> =
-        keep_ids.iter().map(|&id| id as usize).collect();
-    let len = eng.store.tensors.len();
-    for id in 0..len {
-        if !keep.contains(&id) && eng.store.tensors[id].is_some() {
-            eng.store.free(id);
-        }
-    }
+    eng.store.gc(keep_ids.iter().map(|&id| id as usize));
     eng.store.clear_alloc_cache();
     eng.tape = Tape::new();
 }

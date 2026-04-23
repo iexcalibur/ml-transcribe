@@ -1,0 +1,28 @@
+[package]
+name = "mni_framework_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# rlib so other Rust crates (native-swift, native) can depend on it.
+crate-type = ["rlib"]
+
+[features]
+default = ["cpu"]
+cpu = []
+cuda = ["dep:cudarc"]
+webgpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+bytemuck = { version = "1.14", features = ["derive"] }
+rand = "0.8"
+rand_distr = "0.4"
+parking_lot = "0.12"
+smallvec = "1.13"
+cudarc = { version = "0.16", features = ["cublas", "nvrtc", "curand", "cuda-version-from-build-system"], optional = true }
+wgpu = { version = "24", optional = true }
+pollster = { version = "0.4", optional = true }
+
+[profile.release]
+lto = true
+opt-level = 3

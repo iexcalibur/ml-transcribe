@@ -173,6 +173,19 @@ impl TensorStore {
         }
     }
 
+    /// Garbage-collect every tensor not listed in `keep`. Tensors held by
+    /// the caller must have their IDs passed in to survive. Used by the
+    /// N-API `gc_tensors` entry point.
+    pub fn gc<I: IntoIterator<Item = TensorId>>(&mut self, keep: I) {
+        let keep: std::collections::HashSet<TensorId> = keep.into_iter().collect();
+        let len = self.tensors.len();
+        for id in 0..len {
+            if !keep.contains(&id) && self.tensors[id].is_some() {
+                self.free(id);
+            }
+        }
+    }
+
     pub fn data(&self, id: TensorId) -> &[f32] {
         &self.get(id).data
     }
