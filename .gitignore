@@ -1,6 +1,12 @@
 # Dependencies
 node_modules/
 
+# Python (scripts/train_mnist.py virtualenv + downloaded datasets)
+.venv/
+.data/
+__pycache__/
+*.pyc
+
 # Build output
 dist/
 build/
