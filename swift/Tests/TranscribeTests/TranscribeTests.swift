@@ -139,4 +139,158 @@ final class TranscribeTests: XCTestCase {
         let c = a.matmul(i)
         XCTAssertEqual(c.toArray(), [1, 2, 3, 4, 5, 6])
     }
+
+    // MARK: - Elementwise + activations
+
+    func testAdd() throws {
+        let a = try Tensor.from(data: [1, 2, 3, 4], shape: [2, 2])
+        let b = try Tensor.from(data: [10, 20, 30, 40], shape: [2, 2])
+        XCTAssertEqual(a.add(b).toArray(), [11, 22, 33, 44])
+    }
+
+    func testMul() throws {
+        let a = try Tensor.from(data: [1, 2, 3, 4], shape: [2, 2])
+        let b = try Tensor.from(data: [10, 20, 30, 40], shape: [2, 2])
+        XCTAssertEqual(a.mul(b).toArray(), [10, 40, 90, 160])
+    }
+
+    func testRelu() throws {
+        let a = try Tensor.from(data: [-1, 0, 1, -2, 3, -4], shape: [2, 3])
+        XCTAssertEqual(a.relu().toArray(), [0, 0, 1, 0, 3, 0])
+    }
+
+    func testSoftmaxRowsSumToOne() throws {
+        // softmax along last dim → each row should sum to 1.0
+        // and, because input is strictly increasing per row, output
+        // must also be strictly increasing per row.
+        let a = try Tensor.from(data: [1, 2, 3, 4, 5, 6], shape: [2, 3])
+        let s = a.softmax(dim: -1)
+        let arr = s.toArray()
+        XCTAssertEqual(s.shape, [2, 3])
+
+        let row0Sum = arr[0] + arr[1] + arr[2]
+        let row1Sum = arr[3] + arr[4] + arr[5]
+        XCTAssertEqual(row0Sum, 1.0, accuracy: 1e-5)
+        XCTAssertEqual(row1Sum, 1.0, accuracy: 1e-5)
+
+        XCTAssertLessThan(arr[0], arr[1])
+        XCTAssertLessThan(arr[1], arr[2])
+        XCTAssertLessThan(arr[3], arr[4])
+        XCTAssertLessThan(arr[4], arr[5])
+    }
+
+    func testSoftmaxKnownValues() throws {
+        // softmax([1,2,3]) has a closed form. Check the well-known
+        // triplet (rounded): [0.09003, 0.24473, 0.66524].
+        let a = try Tensor.from(data: [1, 2, 3], shape: [3])
+        let s = a.softmax(dim: 0).toArray()
+        XCTAssertEqual(s[0], 0.09003, accuracy: 1e-4)
+        XCTAssertEqual(s[1], 0.24473, accuracy: 1e-4)
+        XCTAssertEqual(s[2], 0.66524, accuracy: 1e-4)
+    }
+
+    // MARK: - Composed ops (sanity check: chaining works)
+
+    func testMlpStyleChain() throws {
+        // Mini "layer": relu(x @ W + b)  — the classic MLP building block.
+        let x = try Tensor.from(data: [1, -2, 3, -4], shape: [1, 4])
+        let w = try Tensor.from(
+            data: [1, 0, 1, 1, 1, 0, 1, 1],
+            shape: [4, 2]
+        )
+        let b = try Tensor.from(data: [-1, 1], shape: [1, 2])
+
+        // Manual calculation:
+        //   x @ W = [[1*1 + -2*1 + 3*1 + -4*1, 1*0 + -2*1 + 3*0 + -4*1]]
+        //         = [[-2, -6]]
+        //   + b   = [[-3, -5]]
+        //   relu  = [[0, 0]]
+        let out = x.matmul(w).add(b).relu()
+        XCTAssertEqual(out.shape, [1, 2])
+        XCTAssertEqual(out.toArray(), [0, 0])
+    }
+
+    // MARK: - Safetensors
+
+    /// Returns a unique tmp file path for this test run.
+    private func tmpSafetensorsPath(_ name: String) -> String {
+        let dir = NSTemporaryDirectory()
+        return (dir as NSString).appendingPathComponent("ml_transcribe_\(name).safetensors")
+    }
+
+    func testSafetensorsRoundTrip() throws {
+        let path = tmpSafetensorsPath("roundtrip")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        // Write a tiny fixture through Swift's save API.
+        let w = try Tensor.from(data: [1, 2, 3, 4, 5, 6], shape: [2, 3])
+        let b = try Tensor.from(data: [10, 20, 30], shape: [3])
+        try SafetensorsWeights.save(
+            [("weight", w), ("bias", b)],
+            to: path
+        )
+
+        // Load back through SafetensorsWeights.
+        let loaded = try SafetensorsWeights(path: path)
+        XCTAssertEqual(loaded.count, 2)
+        XCTAssertEqual(loaded.keys, ["bias", "weight"]) // sorted
+
+        let wRead = loaded["weight"]
+        XCTAssertNotNil(wRead)
+        XCTAssertEqual(wRead!.shape, [2, 3])
+        XCTAssertEqual(wRead!.toArray(), [1, 2, 3, 4, 5, 6])
+
+        let bRead = loaded["bias"]
+        XCTAssertNotNil(bRead)
+        XCTAssertEqual(bRead!.shape, [3])
+        XCTAssertEqual(bRead!.toArray(), [10, 20, 30])
+
+        // Missing key returns nil.
+        XCTAssertNil(loaded["does_not_exist"])
+    }
+
+    func testSafetensorsLoadFailure() {
+        XCTAssertThrowsError(try SafetensorsWeights(path: "/does/not/exist.safetensors"))
+    }
+
+    func testSafetensorsBorrowedTensorsUsableInOps() throws {
+        // Real-world usage: load weights, use them in forward pass.
+        let path = tmpSafetensorsPath("forward")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let w = try Tensor.from(data: [1, 0, 0, 1], shape: [2, 2]) // identity
+        let b = try Tensor.from(data: [10, 20], shape: [1, 2])
+        try SafetensorsWeights.save(
+            [("W", w), ("b", b)],
+            to: path
+        )
+
+        let weights = try SafetensorsWeights(path: path)
+        let W = weights["W"]!
+        let B = weights["b"]!
+
+        // x @ I + b = x + b, where x = [[3, 4]].
+        let x = try Tensor.from(data: [3, 4], shape: [1, 2])
+        let out = x.matmul(W).add(B)
+        XCTAssertEqual(out.toArray(), [13, 24])
+    }
+
+    func testSafetensorsTensorsOutliveHandle() throws {
+        // The Tensor view must keep the SafetensorsWeights alive via
+        // its strong `owner` ref. Dropping `loaded` here while still
+        // holding `w` must NOT cause a use-after-free when w is read.
+        let path = tmpSafetensorsPath("outlive")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let w0 = try Tensor.from(data: [7, 8, 9], shape: [3])
+        try SafetensorsWeights.save([("w", w0)], to: path)
+
+        var loaded: SafetensorsWeights? = try SafetensorsWeights(path: path)
+        let borrowed = loaded!["w"]!
+        loaded = nil // Release our explicit ref to the collection.
+
+        // `borrowed` retains `loaded` internally — the file's data must
+        // still be readable.
+        XCTAssertEqual(borrowed.toArray(), [7, 8, 9])
+    }
 }

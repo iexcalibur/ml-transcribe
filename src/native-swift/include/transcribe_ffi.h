@@ -45,6 +45,41 @@ void     ml_engine_release(uint32_t id);
 
 uint32_t ml_engine_matmul(uint32_t a, uint32_t b);
 
+// Elementwise. Shapes must be broadcast-compatible.
+uint32_t ml_engine_add(uint32_t a, uint32_t b);
+uint32_t ml_engine_mul(uint32_t a, uint32_t b);
+
+// Activations / reductions.
+uint32_t ml_engine_relu(uint32_t a);
+uint32_t ml_engine_softmax(uint32_t a, int32_t dim);
+
+// ---------------------------------------------------------------------------
+// Safetensors (F32 only for now)
+//
+// Load: returns an opaque handle. Names are retrieved by index; ids are
+// retrieved by name. All loaded tensors are freed when the handle is.
+//
+// Save: builder pattern — open, add pairs, finish. Returns 0 on success.
+// ---------------------------------------------------------------------------
+
+typedef struct LoadedWeightsHandle LoadedWeightsHandle;
+typedef struct SavePlan SavePlan;
+
+LoadedWeightsHandle* ml_engine_safetensors_load(const uint8_t* path, uint64_t path_len);
+uint64_t ml_engine_safetensors_count(const LoadedWeightsHandle* h);
+uint64_t ml_engine_safetensors_name_len(const LoadedWeightsHandle* h, uint64_t idx);
+uint64_t ml_engine_safetensors_name_at(const LoadedWeightsHandle* h, uint64_t idx,
+                                       uint8_t* out, uint64_t out_len);
+uint32_t ml_engine_safetensors_get(const LoadedWeightsHandle* h,
+                                   const uint8_t* name, uint64_t name_len);
+void     ml_engine_safetensors_free(LoadedWeightsHandle* h);
+
+SavePlan* ml_engine_safetensors_save_open(void);
+int32_t   ml_engine_safetensors_save_add(SavePlan* p, const uint8_t* name, uint64_t name_len,
+                                         uint32_t id);
+int32_t   ml_engine_safetensors_save_finish(SavePlan* p,
+                                            const uint8_t* path, uint64_t path_len);
+
 #ifdef __cplusplus
 }
 #endif

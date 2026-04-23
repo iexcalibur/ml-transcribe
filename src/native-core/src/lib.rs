@@ -28,6 +28,7 @@
 pub mod allocator;
 pub mod autograd;
 pub mod device;
+pub mod io;
 pub mod ops;
 pub mod tensor;
 pub mod utils;
