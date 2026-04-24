@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "Transcribe", targets: ["Transcribe"]),
+        .executable(name: "inspect-model", targets: ["InspectModel"]),
     ],
     targets: [
         // Binary xcframework wrapping the Rust staticlib.
@@ -22,6 +23,14 @@ let package = Package(
             name: "Transcribe",
             dependencies: ["TranscribeFFIC"],
             path: "Sources/Transcribe"
+        ),
+        // CLI tool for inspecting a real HuggingFace safetensors model:
+        //   swift run inspect-model /path/to/model.safetensors
+        //   swift run inspect-model /path/to/model-dir   (sharded)
+        .executableTarget(
+            name: "InspectModel",
+            dependencies: ["Transcribe"],
+            path: "Sources/InspectModel"
         ),
         .testTarget(
             name: "TranscribeTests",
