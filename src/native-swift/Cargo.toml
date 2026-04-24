@@ -10,6 +10,9 @@ crate-type = ["staticlib"]
 
 [dependencies]
 mni_framework_core = { path = "../native-core" }
+# Minimal features — we just need load/encode/decode via tokenizer.json.
+# Skips onig (system dep), progressbar, http, etc.
+tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
 
 [profile.release]
 lto = true

@@ -166,6 +166,189 @@ public final class Tensor {
         Tensor(id: ml_engine_softmax(self.id, dim))
     }
 
+    /// GELU activation — smooth ReLU variant used by most transformer FFNs.
+    public func gelu() -> Tensor {
+        Tensor(id: ml_engine_gelu(self.id))
+    }
+
+    /// Sigmoid: `1 / (1 + exp(-x))`.
+    public func sigmoid() -> Tensor {
+        Tensor(id: ml_engine_sigmoid(self.id))
+    }
+
+    /// SiLU / Swish: `x * sigmoid(x)`. Composed in Swift from `mul` +
+    /// `sigmoid` — no dedicated Rust op needed.
+    public func silu() -> Tensor {
+        self.mul(self.sigmoid())
+    }
+
+    /// LayerNorm over the last dim. `gamma` and `beta` must have shape
+    /// `[C]` where `C = shape.last`. `eps` is typically `1e-5`.
+    public func layerNorm(gamma: Tensor, beta: Tensor, eps: Float = 1e-5) -> Tensor {
+        Tensor(id: ml_engine_layernorm(self.id, gamma.id, beta.id, eps))
+    }
+
+    /// RMSNorm over the last dim: `y = gamma * x / sqrt(mean(x²) + eps)`.
+    /// Unlike LayerNorm, doesn't subtract the mean and has no bias.
+    /// `gamma` must have shape `[C]` where `C = shape.last`.
+    /// Used by LLaMA, Mistral, and most modern decoder-only LMs.
+    public func rmsNorm(gamma: Tensor, eps: Float = 1e-5) -> Tensor {
+        let newId = ml_engine_rmsnorm(self.id, gamma.id, eps)
+        precondition(newId != UInt32.max,
+            "rmsNorm: expected gamma shape [\(shape.last ?? -1)], got \(gamma.shape)")
+        return Tensor(id: newId)
+    }
+
+    /// Scaled dot-product attention. `self` is the query; all three
+    /// must be `[BH, S, D]` (batched heads × seq_len × head_dim).
+    /// Output shape matches. `scale` is typically `1 / sqrt(Float(D))`.
+    /// When `causal = true`, position `i` can only attend to positions
+    /// `j <= i` (decoder self-attention).
+    public func attention(
+        key: Tensor,
+        value: Tensor,
+        scale: Float,
+        causal: Bool = false
+    ) -> Tensor {
+        Tensor(id: ml_engine_attention(
+            self.id, key.id, value.id, scale, causal ? 1 : 0
+        ))
+    }
+
+    // MARK: - Layout (reshape / transpose / contiguous)
+
+    /// Return a view of the tensor with a new shape. Total element
+    /// count must match `numel`. After a `permute`, prefer calling
+    /// `contiguous()` first so the view reflects the post-permute
+    /// memory order rather than the original.
+    public func reshape(_ newShape: [Int]) -> Tensor {
+        let expected = newShape.reduce(1, *)
+        precondition(
+            expected == Int(numel),
+            "reshape: new shape \(newShape) implies \(expected) elements, tensor has \(numel)"
+        )
+        let dims = newShape.map { UInt64($0) }
+        let newId = dims.withUnsafeBufferPointer { buf in
+            ml_engine_reshape(id, buf.baseAddress, UInt64(buf.count))
+        }
+        return Tensor(id: newId)
+    }
+
+    /// Permute dimensions according to `dims`. `dims` must be a
+    /// permutation of `0..<shape.count`. Example: swap the last two
+    /// dims of a 4-D tensor with `permute([0, 1, 3, 2])`.
+    ///
+    /// Result is usually non-contiguous — follow with `.contiguous()`
+    /// before any op that requires row-major layout.
+    public func permute(_ dims: [Int]) -> Tensor {
+        let ndim = shape.count
+        precondition(dims.count == ndim,
+            "permute: \(dims.count) dims given for \(ndim)-D tensor")
+        precondition(Set(dims) == Set(0..<ndim),
+            "permute: \(dims) is not a permutation of 0..<\(ndim)")
+        let raw = dims.map { UInt64($0) }
+        let newId = raw.withUnsafeBufferPointer { buf in
+            ml_engine_permute(id, buf.baseAddress, UInt64(buf.count))
+        }
+        return Tensor(id: newId)
+    }
+
+    /// Convenience: swap two dims. `transpose(d0, d1)` is equivalent
+    /// to `permute(...)` with the two dims swapped in the identity
+    /// permutation. Matches PyTorch's signature.
+    public func transpose(_ d0: Int, _ d1: Int) -> Tensor {
+        var dims = Array(0..<shape.count)
+        dims.swapAt(d0, d1)
+        return permute(dims)
+    }
+
+    /// Force row-major memory layout. No-op if already contiguous.
+    /// Required between `permute` and `reshape` if you want the reshape
+    /// to see the permuted order rather than the original strides.
+    ///
+    /// When the input is already contiguous, the Rust `ensure_contiguous`
+    /// returns the same id — we must `return self` in that case so ARC
+    /// sees a single owner. Wrapping the same id in a fresh Tensor
+    /// would double-release it.
+    public func contiguous() -> Tensor {
+        let newId = ml_engine_contiguous(id)
+        if newId == self.id {
+            return self
+        }
+        return Tensor(id: newId)
+    }
+
+    // MARK: - Embedding lookup
+
+    /// Look up token ids in this tensor (treated as an embedding table
+    /// of shape `[vocab_size, embed_dim]`). `tokens` is a 2-D array of
+    /// shape `[batch][seq_len]`; output shape is
+    /// `[batch, seq_len, embed_dim]`.
+    ///
+    /// Each id must be in `0..<vocab_size`. Out-of-bounds ids cause a
+    /// panic in the Rust core; we precondition here with a clearer
+    /// message.
+    public func embed(tokens: [[Int]]) -> Tensor {
+        let batch = tokens.count
+        let seqLen = tokens.first?.count ?? 0
+        precondition(tokens.allSatisfy { $0.count == seqLen },
+            "embed: inner arrays must all have the same length")
+
+        // Table is [vocab_size, embed_dim].
+        let tableShape = shape
+        precondition(tableShape.count == 2,
+            "embed: table must be 2-D [vocab, dim], got \(tableShape)")
+        let vocabSize = tableShape[0]
+        for row in tokens {
+            for id in row {
+                precondition(id >= 0 && id < vocabSize,
+                    "embed: token id \(id) out of range 0..<\(vocabSize)")
+            }
+        }
+
+        let flat: [UInt64] = tokens.flatMap { $0.map { UInt64($0) } }
+        let newId: UInt32 = flat.withUnsafeBufferPointer { buf in
+            ml_engine_embedding(
+                id,
+                buf.baseAddress,
+                UInt64(buf.count),
+                UInt64(batch),
+                UInt64(seqLen)
+            )
+        }
+        precondition(newId != UInt32.max,
+            "embed: Rust engine rejected the inputs")
+        return Tensor(id: newId)
+    }
+
+    /// Convenience for a single sequence (batch = 1).
+    /// Output shape is `[1, tokens.count, embed_dim]`.
+    public func embed(tokens: [Int]) -> Tensor {
+        embed(tokens: [tokens])
+    }
+
+    // MARK: - Positional encoding
+
+    /// Apply RoPE (rotary position embedding) to the last two dims
+    /// (`[..., S, D]`). `D` must be even.
+    ///
+    /// Half-split convention: pairs feature `i` with `i + D/2` (LLaMA /
+    /// HuggingFace). Apply this to both Q and K before attention; V is
+    /// left unrotated.
+    ///
+    /// - `startPos`: position of the first token along the sequence
+    ///   axis. Use 0 for a fresh forward pass; during incremental
+    ///   decoding with a KV cache, pass the length of the cache so the
+    ///   new token gets the right absolute position.
+    /// - `base`: frequency base. 10,000 is the LLaMA default; some
+    ///   long-context models (e.g. extended LLaMA) use 500,000 or more.
+    public func rope(startPos: Int = 0, base: Float = 10_000.0) -> Tensor {
+        let newId = ml_engine_rope(id, UInt64(startPos), base)
+        precondition(newId != UInt32.max,
+            "rope: expected shape [..., S, D] with D even; got \(shape)")
+        return Tensor(id: newId)
+    }
+
     // MARK: - Lifetime
 
     deinit {
@@ -174,6 +357,121 @@ public final class Tensor {
         if owner == nil {
             ml_engine_release(id)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KV cache — for incremental autoregressive decoding
+// ---------------------------------------------------------------------------
+
+/// Errors from KV cache operations.
+public enum KVCacheError: Error {
+    case unknownHandle
+    case shapeMismatch
+    case appendOverflow
+    case engineError
+}
+
+/// A state-holding cache of past keys and values for one attention
+/// layer, used during autoregressive decoding.
+///
+/// Typical use inside one decode step:
+///
+///   let out = try cache.appendAndDecode(
+///       query: q, key: k, value: v,
+///       scale: 1.0 / sqrt(Float(headDim))
+///   )
+///
+/// Each call appends one new step (`k` and `v` at position = length)
+/// and returns attention over ALL past keys/values — O(length) instead
+/// of O(length²). Compare to re-running full attention from scratch
+/// every step.
+///
+/// Create one cache per attention layer in the model. Caches are
+/// freed automatically on deinit.
+public final class KVCache {
+    public struct Config {
+        public let batchSize: Int
+        public let numHeads: Int
+        public let headDim: Int
+        public let maxSeqLen: Int
+        public let quantized: Bool
+
+        public init(
+            batchSize: Int = 1,
+            numHeads: Int,
+            headDim: Int,
+            maxSeqLen: Int,
+            quantized: Bool = false
+        ) {
+            self.batchSize = batchSize
+            self.numHeads = numHeads
+            self.headDim = headDim
+            self.maxSeqLen = maxSeqLen
+            self.quantized = quantized
+        }
+    }
+
+    public let config: Config
+    private let handle: UInt32
+
+    public init(config: Config) {
+        self.config = config
+        self.handle = ml_engine_kvcache_new(
+            UInt64(config.batchSize),
+            UInt64(config.numHeads),
+            UInt64(config.headDim),
+            UInt64(config.maxSeqLen),
+            config.quantized ? 1 : 0
+        )
+        precondition(handle != 0, "KVCache: allocation failed")
+    }
+
+    /// Current fill level (how many tokens have been appended).
+    public var length: Int {
+        Int(ml_engine_kvcache_len(handle))
+    }
+
+    /// Zero out the cache; length returns to 0.
+    public func reset() {
+        ml_engine_kvcache_reset(handle)
+    }
+
+    /// Append one step of K and V without computing attention.
+    /// Useful when you want to prefill the cache with a batch of
+    /// tokens processed by a separate (non-cached) forward pass.
+    ///
+    /// Shapes: `k` and `v` must each be `[B, H, 1, D]`.
+    public func append(key: Tensor, value: Tensor) throws {
+        let rc = ml_engine_kvcache_append(handle, key.id, value.id)
+        switch rc {
+        case 0:  return
+        case -1: throw KVCacheError.unknownHandle
+        case -2: throw KVCacheError.shapeMismatch
+        default: throw KVCacheError.engineError
+        }
+    }
+
+    /// Append one step and compute attention against all cached
+    /// keys/values. Returns the attention output for the single query
+    /// step. Shapes: all three inputs `[B, H, 1, D]`; output `[B, H, 1, D]`.
+    public func appendAndDecode(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        scale: Float
+    ) throws -> Tensor {
+        let outId = ml_engine_kvcache_append_and_decode(
+            handle, query.id, key.id, value.id, scale
+        )
+        guard outId != UInt32.max else {
+            throw KVCacheError.engineError
+        }
+        return Tensor(id: outId)
+    }
+
+    deinit {
+        ml_engine_kvcache_free(handle)
     }
 }
 
@@ -189,6 +487,30 @@ public enum SafetensorsError: Error {
     /// Asked to save a Tensor that is a borrowed view — we don't own
     /// its lifecycle, so this would be surprising. Explicitly disallow.
     case cannotSaveBorrowedTensor
+    /// Sharded load failed: the index JSON was missing or malformed.
+    case indexMalformed(path: String)
+    /// A shard referenced by the index was missing on disk.
+    case missingShard(path: String)
+}
+
+// ---------------------------------------------------------------------------
+// WeightSource — a name-indexed lookup of weights.
+// ---------------------------------------------------------------------------
+
+/// Anything that exposes a name-keyed view of tensors. Both
+/// `SafetensorsWeights` (raw files) and `WeightMap` (renamed /
+/// transposed views) conform, so `DecoderLM` and friends can accept
+/// either transparently.
+public protocol WeightSource: AnyObject {
+    var count: Int { get }
+    var keys: [String] { get }
+    subscript(name: String) -> Tensor? { get }
+}
+
+/// The minimum shape of a `model.safetensors.index.json` we care about.
+/// The real file may have extra keys like `metadata`; Codable ignores them.
+private struct SafetensorsIndex: Decodable {
+    let weight_map: [String: String]
 }
 
 /// A read-only, name-indexed collection of tensors loaded from a
@@ -200,62 +522,151 @@ public enum SafetensorsError: Error {
 /// every loaded tensor at once. Each borrowed `Tensor` retains a
 /// strong reference to this `SafetensorsWeights`, so the collection
 /// stays alive as long as any view exists.
-public final class SafetensorsWeights {
-    private let handle: OpaquePointer
+public final class SafetensorsWeights: WeightSource {
+    /// One `LoadedWeightsHandle` per underlying file. For a single-file
+    /// model this is a one-element array; for a sharded HuggingFace
+    /// model (e.g. `model-00001-of-00003.safetensors` + friends) it
+    /// holds one handle per shard, in load order.
+    ///
+    /// Tensor lookups iterate handles and return the first hit. Names
+    /// are expected to be unique across shards (the HF convention);
+    /// if a name were duplicated, the first shard loaded wins.
+    private let handles: [OpaquePointer]
 
-    /// Load a `.safetensors` file into the engine.
-    /// Only F32 tensors are supported for now.
+    // MARK: - Single-file load
+
+    /// Load a single `.safetensors` file into the engine.
     public convenience init(path: URL) throws {
         try self.init(path: path.path)
     }
 
     public init(path: String) throws {
-        let maybeHandle: OpaquePointer? = path.withCString { cstr in
+        guard let h = Self.openHandle(path: path) else {
+            throw SafetensorsError.loadFailed(path: path)
+        }
+        self.handles = [h]
+    }
+
+    // MARK: - Sharded load
+
+    /// Load a sharded HuggingFace model described by a
+    /// `model.safetensors.index.json` file at `indexPath`. The index's
+    /// `weight_map` is parsed to discover which shard files to load;
+    /// each shard is resolved relative to the index file's directory.
+    ///
+    /// Throws `SafetensorsError.indexMalformed` or `.missingShard` if
+    /// the index is bad or a referenced shard doesn't exist.
+    public convenience init(shardedIndex indexPath: URL) throws {
+        try self.init(shardedIndex: indexPath.path)
+    }
+
+    public init(shardedIndex indexPath: String) throws {
+        let url = URL(fileURLWithPath: indexPath)
+        guard let data = try? Data(contentsOf: url) else {
+            throw SafetensorsError.indexMalformed(path: indexPath)
+        }
+        let index: SafetensorsIndex
+        do {
+            index = try JSONDecoder().decode(SafetensorsIndex.self, from: data)
+        } catch {
+            throw SafetensorsError.indexMalformed(path: indexPath)
+        }
+
+        // Collect unique shard filenames, preserving discovery order so
+        // load order is deterministic (makes "first shard wins" on
+        // duplicate names predictable).
+        var seen = Set<String>()
+        var shardNames: [String] = []
+        for (_, file) in index.weight_map {
+            if seen.insert(file).inserted {
+                shardNames.append(file)
+            }
+        }
+
+        let baseDir = url.deletingLastPathComponent()
+        var opened: [OpaquePointer] = []
+        for name in shardNames {
+            let shardURL = baseDir.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: shardURL.path) else {
+                // Clean up anything we already opened.
+                for h in opened { ml_engine_safetensors_free(h) }
+                throw SafetensorsError.missingShard(path: shardURL.path)
+            }
+            guard let h = Self.openHandle(path: shardURL.path) else {
+                for h in opened { ml_engine_safetensors_free(h) }
+                throw SafetensorsError.loadFailed(path: shardURL.path)
+            }
+            opened.append(h)
+        }
+        self.handles = opened
+    }
+
+    /// Convenience: point at a directory and expect the standard
+    /// `model.safetensors.index.json` filename inside it.
+    public convenience init(shardedDirectory: URL) throws {
+        let indexURL = shardedDirectory
+            .appendingPathComponent("model.safetensors.index.json")
+        try self.init(shardedIndex: indexURL)
+    }
+
+    // MARK: - Query
+
+    /// Total tensor count across all shards.
+    public var count: Int {
+        handles.reduce(0) { $0 + Int(ml_engine_safetensors_count($1)) }
+    }
+
+    /// All tensor names, sorted. Duplicates across shards (shouldn't
+    /// happen in well-formed HF files) are de-duped.
+    public var keys: [String] {
+        var all = Set<String>()
+        var scratch = [UInt8](repeating: 0, count: 256)
+        for handle in handles {
+            let n = Int(ml_engine_safetensors_count(handle))
+            for i in 0..<n {
+                let nameLen = Int(ml_engine_safetensors_name_len(handle, UInt64(i)))
+                if nameLen > scratch.count {
+                    scratch = [UInt8](repeating: 0, count: nameLen)
+                }
+                let written = scratch.withUnsafeMutableBufferPointer { buf in
+                    Int(ml_engine_safetensors_name_at(
+                        handle, UInt64(i), buf.baseAddress, UInt64(nameLen)))
+                }
+                all.insert(String(decoding: scratch.prefix(written), as: UTF8.self))
+            }
+        }
+        return all.sorted()
+    }
+
+    /// Borrowed view of the tensor with the given name, or nil. When
+    /// sharded, returns the tensor from the first shard that contains
+    /// it (load order).
+    public subscript(name: String) -> Tensor? {
+        for handle in handles {
+            let id: UInt32 = name.withCString { cstr in
+                let bytes = UnsafeRawPointer(cstr).assumingMemoryBound(to: UInt8.self)
+                return ml_engine_safetensors_get(handle, bytes, UInt64(strlen(cstr)))
+            }
+            if id != UInt32.max {
+                return Tensor(id: id, ownedBy: self)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Helpers
+
+    private static func openHandle(path: String) -> OpaquePointer? {
+        return path.withCString { cstr in
             let bytes = UnsafeRawPointer(cstr).assumingMemoryBound(to: UInt8.self)
             return ml_engine_safetensors_load(bytes, UInt64(strlen(cstr)))
         }
-        guard let h = maybeHandle else {
-            throw SafetensorsError.loadFailed(path: path)
-        }
-        self.handle = h
-    }
-
-    /// Number of tensors in the file.
-    public var count: Int {
-        Int(ml_engine_safetensors_count(handle))
-    }
-
-    /// All tensor names, in sorted order.
-    public var keys: [String] {
-        let n = count
-        var result: [String] = []
-        result.reserveCapacity(n)
-        var scratch = [UInt8](repeating: 0, count: 256)
-        for i in 0..<n {
-            let nameLen = Int(ml_engine_safetensors_name_len(handle, UInt64(i)))
-            if nameLen > scratch.count { scratch = [UInt8](repeating: 0, count: nameLen) }
-            let written = scratch.withUnsafeMutableBufferPointer { buf in
-                Int(ml_engine_safetensors_name_at(
-                    handle, UInt64(i), buf.baseAddress, UInt64(nameLen)))
-            }
-            let name = String(decoding: scratch.prefix(written), as: UTF8.self)
-            result.append(name)
-        }
-        return result
-    }
-
-    /// Borrowed view of the tensor with the given name, or nil.
-    public subscript(name: String) -> Tensor? {
-        let id: UInt32 = name.withCString { cstr in
-            let bytes = UnsafeRawPointer(cstr).assumingMemoryBound(to: UInt8.self)
-            return ml_engine_safetensors_get(handle, bytes, UInt64(strlen(cstr)))
-        }
-        guard id != UInt32.max else { return nil }
-        return Tensor(id: id, ownedBy: self)
     }
 
     deinit {
-        ml_engine_safetensors_free(handle)
+        for handle in handles {
+            ml_engine_safetensors_free(handle)
+        }
     }
 
     // MARK: - Saving (mostly for tests / debugging)
