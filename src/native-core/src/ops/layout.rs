@@ -237,10 +237,11 @@ pub fn contiguous_backward(grad: TensorId, _saved: &SavedContext, _store: &mut T
 #[cfg(any(feature = "cpu", feature = "webgpu"))]
 impl TensorStore {
     pub fn insert_raw(&mut self, data: Vec<f32>, shape: Vec<usize>, strides: Vec<usize>, size: usize) -> TensorId {
-        use crate::tensor::GpuTensor;
+        use crate::tensor::{Dtype, GpuTensor};
         let t = GpuTensor {
             data, shape, strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         };
         if let Some(id) = self.free_ids.pop() {
             self.tensors[id] = Some(t);

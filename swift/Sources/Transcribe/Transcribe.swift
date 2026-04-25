@@ -10,6 +10,37 @@ public enum Transcribe {
 }
 
 // ---------------------------------------------------------------------------
+// Storage dtype
+// ---------------------------------------------------------------------------
+
+/// On-device storage dtype for a tensor in the engine. F16 halves the
+/// resident memory of a tensor compared to F32; ops still operate on
+/// F32 and up-convert F16 transiently when consumed.
+///
+/// Distinct from `SafetensorsWeights.Dtype`, which describes a tensor's
+/// dtype when *serialized to disk*. The two coincide in name but are
+/// different types in different scopes.
+public enum TensorDtype: Equatable {
+    case f32
+    case f16
+
+    fileprivate var rawValue: UInt32 {
+        switch self {
+        case .f32: return 0
+        case .f16: return 1
+        }
+    }
+
+    fileprivate static func decode(_ raw: UInt32) -> TensorDtype? {
+        switch raw {
+        case 0: return .f32
+        case 1: return .f16
+        default: return nil
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tensor
 // ---------------------------------------------------------------------------
 
@@ -104,6 +135,22 @@ public final class Tensor {
     /// Total number of elements (product of shape dims).
     public var numel: UInt64 {
         ml_engine_numel(id)
+    }
+
+    /// Storage dtype. F16 tensors take half the memory of F32 but are
+    /// up-converted to F32 transiently when consumed by ops.
+    public var dtype: TensorDtype {
+        let raw = ml_engine_dtype(id)
+        return TensorDtype.decode(raw) ?? .f32
+    }
+
+    /// Convert this tensor's storage to the requested dtype, returning
+    /// a new Tensor (or `self` if already in `target`). The original
+    /// tensor is unchanged.
+    public func cast(to target: TensorDtype) -> Tensor {
+        let newId = ml_engine_cast_dtype(id, target.rawValue)
+        if newId == self.id { return self }
+        return Tensor(id: newId)
     }
 
     /// Full shape as a Swift array.
@@ -275,6 +322,29 @@ public final class Tensor {
         if newId == self.id {
             return self
         }
+        return Tensor(id: newId)
+    }
+
+    /// PyTorch's `repeat_interleave`: duplicates each slice along `dim`
+    /// `repeats` times consecutively. For input shape `[..., d_k, ...]`
+    /// with `dim = k`, output shape is `[..., d_k * repeats, ...]`.
+    ///
+    /// Layout: element `i` along `dim` in input → elements
+    /// `[i*repeats, (i+1)*repeats - 1]` in output.
+    ///
+    /// Negative `dim` counts from the end (matches PyTorch).
+    ///
+    /// Main use case: GQA expansion. K/V tensors shaped
+    /// `[B, H_kv, S, D_h]` become `[B, H_q, S, D_h]` via
+    /// `.repeatInterleave(dim: 1, repeats: H_q/H_kv)`, broadcasting
+    /// each KV head to the G consecutive Q heads that share it.
+    public func repeatInterleave(dim: Int, repeats: Int) -> Tensor {
+        precondition(repeats >= 1, "repeats must be >= 1")
+        let newId = ml_engine_repeat_interleave(
+            id, Int32(dim), UInt32(repeats)
+        )
+        precondition(newId != UInt32.max,
+            "repeatInterleave: invalid dim \(dim) for shape \(shape)")
         return Tensor(id: newId)
     }
 
@@ -540,11 +610,24 @@ public final class SafetensorsWeights: WeightSource {
         try self.init(path: path.path)
     }
 
-    public init(path: String) throws {
-        guard let h = Self.openHandle(path: path) else {
+    public convenience init(path: String) throws {
+        try self.init(path: path, keepF16: false)
+    }
+
+    /// Single-file load with explicit dtype handling. When
+    /// `keepF16: true`, F16 source tensors are stored as F16 in the
+    /// engine (halving resident memory of weights) instead of being
+    /// up-converted to F32. F32 and BF16 source dtypes are unaffected.
+    public init(path: String, keepF16: Bool) throws {
+        guard let h = Self.openHandle(path: path, keepF16: keepF16) else {
             throw SafetensorsError.loadFailed(path: path)
         }
         self.handles = [h]
+    }
+
+    /// URL convenience that takes the same `keepF16` knob.
+    public convenience init(path: URL, keepF16: Bool) throws {
+        try self.init(path: path.path, keepF16: keepF16)
     }
 
     // MARK: - Sharded load
@@ -656,10 +739,13 @@ public final class SafetensorsWeights: WeightSource {
 
     // MARK: - Helpers
 
-    private static func openHandle(path: String) -> OpaquePointer? {
+    private static func openHandle(path: String, keepF16: Bool = false) -> OpaquePointer? {
         return path.withCString { cstr in
             let bytes = UnsafeRawPointer(cstr).assumingMemoryBound(to: UInt8.self)
-            return ml_engine_safetensors_load(bytes, UInt64(strlen(cstr)))
+            let len = UInt64(strlen(cstr))
+            return keepF16
+                ? ml_engine_safetensors_load_keep_f16(bytes, len)
+                : ml_engine_safetensors_load(bytes, len)
         }
     }
 

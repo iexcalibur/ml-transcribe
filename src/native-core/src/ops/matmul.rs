@@ -1,6 +1,6 @@
 use smallvec::smallvec;
 use crate::autograd::{BackwardOp, SavedContext, Tape, TapeEntry};
-use crate::tensor::{TensorId, TensorStore, shape_size};
+use crate::tensor::{Dtype, TensorId, TensorStore, shape_size};
 
 #[cfg(feature = "cuda")]
 use crate::tensor::compute_strides;
@@ -42,32 +42,73 @@ pub fn matmul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape
     let a_batch_size = shape_size(&a_batch);
     let b_batch_size = shape_size(&b_batch);
 
-    let a_data = store.to_host(a_id);
-    let b_data = store.to_host(b_id);
+    // A is typically the activation (small, F32). B is typically the
+    // weight (large, possibly F16). For F32 B we go through to_host
+    // (clones into a Vec<f32>); for F16 B we read straight from the
+    // F16 store with per-element up-conversion in the inner loop —
+    // no full F32 materialization of the weight.
+    //
+    // The match arms collect their own scope so all immutable
+    // borrows of `store` are released before the final mutable
+    // `from_vec` call below.
     let out_size = shape_size(&out_shape);
-    let mut out = vec![0.0f32; out_size];
-
     let a_mat = m * k;
     let b_mat = k * n;
     let c_mat = m * n;
 
-    for batch in 0..batch_size {
-        let a_batch_idx = if a_batch_size == 1 { 0 } else { batch % a_batch_size };
-        let b_batch_idx = if b_batch_size == 1 { 0 } else { batch % b_batch_size };
+    let out: Vec<f32> = {
+        let a_data = store.to_host(a_id);
+        let b_dtype = store.get(b_id).dtype;
+        let mut out = vec![0.0f32; out_size];
 
-        let a_off = a_batch_idx * a_mat;
-        let b_off = b_batch_idx * b_mat;
-        let c_off = batch * c_mat;
+        match b_dtype {
+            Dtype::F32 => {
+                let b_data = store.to_host(b_id);
+                for batch in 0..batch_size {
+                    let a_batch_idx = if a_batch_size == 1 { 0 } else { batch % a_batch_size };
+                    let b_batch_idx = if b_batch_size == 1 { 0 } else { batch % b_batch_size };
+                    let a_off = a_batch_idx * a_mat;
+                    let b_off = b_batch_idx * b_mat;
+                    let c_off = batch * c_mat;
 
-        for i in 0..m {
-            for kk in 0..k {
-                let a_val = a_data[a_off + i * k + kk];
-                for j in 0..n {
-                    out[c_off + i * n + j] += a_val * b_data[b_off + kk * n + j];
+                    for i in 0..m {
+                        for kk in 0..k {
+                            let a_val = a_data[a_off + i * k + kk];
+                            for j in 0..n {
+                                out[c_off + i * n + j] += a_val * b_data[b_off + kk * n + j];
+                            }
+                        }
+                    }
+                }
+            }
+            Dtype::F16 => {
+                // Borrow B's F16 storage directly. No Vec<f32> allocation
+                // for B — peak memory drops by sizeof(B) f32 bytes.
+                let b_data_f16 = &store.get(b_id).data_f16;
+                for batch in 0..batch_size {
+                    let a_batch_idx = if a_batch_size == 1 { 0 } else { batch % a_batch_size };
+                    let b_batch_idx = if b_batch_size == 1 { 0 } else { batch % b_batch_size };
+                    let a_off = a_batch_idx * a_mat;
+                    let b_off = b_batch_idx * b_mat;
+                    let c_off = batch * c_mat;
+
+                    for i in 0..m {
+                        for kk in 0..k {
+                            let a_val = a_data[a_off + i * k + kk];
+                            for j in 0..n {
+                                // Per-element F16 → F32 conversion. Each
+                                // load is u16 + cvt; cheap on Apple
+                                // Silicon (no software emulation).
+                                let b_val = b_data_f16[b_off + kk * n + j].to_f32();
+                                out[c_off + i * n + j] += a_val * b_val;
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
+        out
+    };
 
     let out_id = store.from_vec(out, &out_shape);
     tape.record(TapeEntry {

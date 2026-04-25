@@ -39,6 +39,10 @@ uint64_t ml_engine_copy_into(uint32_t id, float* out, uint64_t out_len);
 
 void     ml_engine_release(uint32_t id);
 
+// Dtype encoding: 0 = F32, 1 = F16. Returns u32::MAX on unknown id.
+uint32_t ml_engine_dtype(uint32_t id);
+uint32_t ml_engine_cast_dtype(uint32_t id, uint32_t target_dtype);
+
 // ---------------------------------------------------------------------------
 // Ops
 // ---------------------------------------------------------------------------
@@ -73,6 +77,11 @@ uint32_t ml_engine_attention(uint32_t q, uint32_t k, uint32_t v,
 uint32_t ml_engine_reshape(uint32_t a, const uint64_t* shape, uint64_t shape_len);
 uint32_t ml_engine_permute(uint32_t a, const uint64_t* dims, uint64_t dims_len);
 uint32_t ml_engine_contiguous(uint32_t a);
+
+// PyTorch's repeat_interleave: each slice along `dim` is duplicated
+// `repeats` times consecutively. Negative `dim` counts from the end.
+// Primary use: GQA broadcasting of K/V heads across Q groups.
+uint32_t ml_engine_repeat_interleave(uint32_t a, int32_t dim, uint32_t repeats);
 
 // Embedding lookup. weight is [vocab_size, embed_dim]; indices is a
 // flat buffer of length (batch * seq_len). Output shape is
@@ -150,6 +159,9 @@ typedef struct LoadedWeightsHandle LoadedWeightsHandle;
 typedef struct SavePlan SavePlan;
 
 LoadedWeightsHandle* ml_engine_safetensors_load(const uint8_t* path, uint64_t path_len);
+// Like load(), but F16 source tensors are kept as F16 in storage
+// (half memory). F32 and BF16 source dtypes still up-convert to F32.
+LoadedWeightsHandle* ml_engine_safetensors_load_keep_f16(const uint8_t* path, uint64_t path_len);
 uint64_t ml_engine_safetensors_count(const LoadedWeightsHandle* h);
 uint64_t ml_engine_safetensors_name_len(const LoadedWeightsHandle* h, uint64_t idx);
 uint64_t ml_engine_safetensors_name_at(const LoadedWeightsHandle* h, uint64_t idx,

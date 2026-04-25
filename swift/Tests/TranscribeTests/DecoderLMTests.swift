@@ -34,6 +34,8 @@ final class DecoderLMTests: XCTestCase {
     ) -> [(String, [Float], [Int])] {
         let D = config.modelDim
         let F = config.ffnDim
+        // Under GQA, K/V project to a smaller [D, Dkv] than Q's [D, D].
+        let Dkv = config.numKVHeads * config.headDim
         func zeros(_ n: Int) -> [Float] { Array(repeating: 0, count: n) }
         func ones(_ n: Int)  -> [Float] { Array(repeating: 1, count: n) }
 
@@ -44,17 +46,17 @@ final class DecoderLMTests: XCTestCase {
             out.append((prefix + "norm1.bias", zeros(D), [D]))
         }
         out.append(contentsOf: [
-            (prefix + "attn.q_proj.weight", zeros(D * D), [D, D]),
-            (prefix + "attn.k_proj.weight", zeros(D * D), [D, D]),
-            (prefix + "attn.v_proj.weight", zeros(D * D), [D, D]),
-            (prefix + "attn.o_proj.weight", zeros(D * D), [D, D]),
+            (prefix + "attn.q_proj.weight", zeros(D * D),   [D, D]),
+            (prefix + "attn.k_proj.weight", zeros(D * Dkv), [D, Dkv]),
+            (prefix + "attn.v_proj.weight", zeros(D * Dkv), [D, Dkv]),
+            (prefix + "attn.o_proj.weight", zeros(D * D),   [D, D]),
         ])
         if config.useBias {
             out.append(contentsOf: [
-                (prefix + "attn.q_proj.bias", zeros(D), [1, 1, D]),
-                (prefix + "attn.k_proj.bias", zeros(D), [1, 1, D]),
-                (prefix + "attn.v_proj.bias", zeros(D), [1, 1, D]),
-                (prefix + "attn.o_proj.bias", zeros(D), [1, 1, D]),
+                (prefix + "attn.q_proj.bias", zeros(D),   [1, 1, D]),
+                (prefix + "attn.k_proj.bias", zeros(Dkv), [1, 1, Dkv]),
+                (prefix + "attn.v_proj.bias", zeros(Dkv), [1, 1, Dkv]),
+                (prefix + "attn.o_proj.bias", zeros(D),   [1, 1, D]),
             ])
         }
         out.append((prefix + "norm2.weight", ones(D), [D]))
@@ -118,12 +120,14 @@ final class DecoderLMTests: XCTestCase {
     ) -> [(String, [Float], [Int])] {
         let D = config.modelDim
         let F = config.ffnDim
+        let Dkv = config.numKVHeads * config.headDim
         func randn(_ n: Int, scale: Float, rng: inout SeededRNG) -> [Float] {
             (0..<n).map { _ in Float.random(in: -scale...scale, using: &rng) }
         }
-        let zerosD = Array(repeating: Float(0), count: D)
-        let zerosF = Array(repeating: Float(0), count: F)
-        let onesD  = Array(repeating: Float(1), count: D)
+        let zerosD   = Array(repeating: Float(0), count: D)
+        let zerosDkv = Array(repeating: Float(0), count: Dkv)
+        let zerosF   = Array(repeating: Float(0), count: F)
+        let onesD    = Array(repeating: Float(1), count: D)
 
         var out: [(String, [Float], [Int])] = [
             (prefix + "norm1.weight", onesD, [D]),
@@ -132,17 +136,17 @@ final class DecoderLMTests: XCTestCase {
             out.append((prefix + "norm1.bias", zerosD, [D]))
         }
         out.append(contentsOf: [
-            (prefix + "attn.q_proj.weight", randn(D * D, scale: 0.1, rng: &rng), [D, D]),
-            (prefix + "attn.k_proj.weight", randn(D * D, scale: 0.1, rng: &rng), [D, D]),
-            (prefix + "attn.v_proj.weight", randn(D * D, scale: 0.1, rng: &rng), [D, D]),
-            (prefix + "attn.o_proj.weight", randn(D * D, scale: 0.1, rng: &rng), [D, D]),
+            (prefix + "attn.q_proj.weight", randn(D * D,   scale: 0.1, rng: &rng), [D, D]),
+            (prefix + "attn.k_proj.weight", randn(D * Dkv, scale: 0.1, rng: &rng), [D, Dkv]),
+            (prefix + "attn.v_proj.weight", randn(D * Dkv, scale: 0.1, rng: &rng), [D, Dkv]),
+            (prefix + "attn.o_proj.weight", randn(D * D,   scale: 0.1, rng: &rng), [D, D]),
         ])
         if config.useBias {
             out.append(contentsOf: [
-                (prefix + "attn.q_proj.bias", zerosD, [1, 1, D]),
-                (prefix + "attn.k_proj.bias", zerosD, [1, 1, D]),
-                (prefix + "attn.v_proj.bias", zerosD, [1, 1, D]),
-                (prefix + "attn.o_proj.bias", zerosD, [1, 1, D]),
+                (prefix + "attn.q_proj.bias", zerosD,   [1, 1, D]),
+                (prefix + "attn.k_proj.bias", zerosDkv, [1, 1, Dkv]),
+                (prefix + "attn.v_proj.bias", zerosDkv, [1, 1, Dkv]),
+                (prefix + "attn.o_proj.bias", zerosD,   [1, 1, D]),
             ])
         }
         out.append((prefix + "norm2.weight", onesD, [D]))

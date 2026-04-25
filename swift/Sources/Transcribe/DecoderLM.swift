@@ -48,6 +48,12 @@ public final class DecoderLM {
         public let vocabSize: Int
         public let modelDim: Int
         public let numHeads: Int
+        /// Number of key/value heads. For plain multi-head attention
+        /// (MHA), this equals `numHeads`. For Grouped Query Attention
+        /// (GQA, LLaMA-2-70B+, LLaMA-3, TinyLlama, SmolLM, Mistral,
+        /// Cohere), it's smaller — each K/V head serves a group of
+        /// `numHeads / numKVHeads` Q heads.
+        public let numKVHeads: Int
         public let ffnDim: Int
         public let numLayers: Int
         public let maxSeqLen: Int
@@ -59,10 +65,15 @@ public final class DecoderLM {
 
         public var headDim: Int { modelDim / numHeads }
 
+        /// Grouping factor: how many Q heads share each K/V head.
+        /// 1 means plain MHA, > 1 means GQA.
+        public var gqaGroupSize: Int { numHeads / numKVHeads }
+
         public init(
             vocabSize: Int,
             modelDim: Int,
             numHeads: Int,
+            numKVHeads: Int? = nil,
             ffnDim: Int,
             numLayers: Int = 1,
             maxSeqLen: Int,
@@ -75,9 +86,13 @@ public final class DecoderLM {
             precondition(modelDim % numHeads == 0,
                 "modelDim (\(modelDim)) must be divisible by numHeads (\(numHeads))")
             precondition(numLayers >= 1, "numLayers must be >= 1")
+            let kv = numKVHeads ?? numHeads
+            precondition(numHeads % kv == 0,
+                "numHeads (\(numHeads)) must be divisible by numKVHeads (\(kv))")
             self.vocabSize = vocabSize
             self.modelDim = modelDim
             self.numHeads = numHeads
+            self.numKVHeads = kv
             self.ffnDim = ffnDim
             self.numLayers = numLayers
             self.maxSeqLen = maxSeqLen
@@ -89,14 +104,17 @@ public final class DecoderLM {
         }
 
         /// GPT / BERT / TinyGPT style: LayerNorm + biases + GELU.
-        /// This is the shape of models from before ~2022.
+        /// This is the shape of models from before ~2022. MHA by default.
         public static func gptStyle(
             vocabSize: Int, modelDim: Int, numHeads: Int, ffnDim: Int,
-            numLayers: Int, maxSeqLen: Int, ropeBase: Float = 10_000,
+            numLayers: Int, maxSeqLen: Int,
+            numKVHeads: Int? = nil,
+            ropeBase: Float = 10_000,
             normEps: Float = 1e-5
         ) -> Config {
             Config(
                 vocabSize: vocabSize, modelDim: modelDim, numHeads: numHeads,
+                numKVHeads: numKVHeads,
                 ffnDim: ffnDim, numLayers: numLayers, maxSeqLen: maxSeqLen,
                 ropeBase: ropeBase, normEps: normEps,
                 normType: .layerNorm, useBias: true, ffnType: .gelu
@@ -104,14 +122,19 @@ public final class DecoderLM {
         }
 
         /// LLaMA / Mistral / Cohere-family style: RMSNorm + no biases
-        /// + SwiGLU. Smaller `normEps` (1e-6) is typical.
+        /// + SwiGLU. Smaller `normEps` (1e-6) is typical. Pass
+        /// `numKVHeads` explicitly for GQA models (TinyLlama uses 4,
+        /// LLaMA-3-8B uses 8, etc.); omit for MHA.
         public static func llamaStyle(
             vocabSize: Int, modelDim: Int, numHeads: Int, ffnDim: Int,
-            numLayers: Int, maxSeqLen: Int, ropeBase: Float = 10_000,
+            numLayers: Int, maxSeqLen: Int,
+            numKVHeads: Int? = nil,
+            ropeBase: Float = 10_000,
             normEps: Float = 1e-6
         ) -> Config {
             Config(
                 vocabSize: vocabSize, modelDim: modelDim, numHeads: numHeads,
+                numKVHeads: numKVHeads,
                 ffnDim: ffnDim, numLayers: numLayers, maxSeqLen: maxSeqLen,
                 ropeBase: ropeBase, normEps: normEps,
                 normType: .rmsNorm, useBias: false, ffnType: .swiGLU
@@ -168,6 +191,9 @@ public final class DecoderLM {
         init(weights: WeightSource, prefix: String, config: Config) throws {
             let D = config.modelDim
             let F = config.ffnDim
+            // GQA: K/V projections produce `numKVHeads * headDim`
+            // features, typically smaller than `D`. For MHA this equals D.
+            let Dkv = config.numKVHeads * config.headDim
 
             func load(_ name: String, expecting shape: [Int]) throws -> Tensor {
                 let full = prefix + name
@@ -197,15 +223,16 @@ public final class DecoderLM {
             self.norm2Bias = config.normType == .layerNorm
                 ? try load("norm2.bias", expecting: [D]) : nil
 
-            // Attention.
+            // Attention. Q and O project full [D, D]; K and V project
+            // the (possibly smaller) [D, Dkv] under GQA.
             self.wQ = try load("attn.q_proj.weight", expecting: [D, D])
-            self.wK = try load("attn.k_proj.weight", expecting: [D, D])
-            self.wV = try load("attn.v_proj.weight", expecting: [D, D])
+            self.wK = try load("attn.k_proj.weight", expecting: [D, Dkv])
+            self.wV = try load("attn.v_proj.weight", expecting: [D, Dkv])
             self.wO = try load("attn.o_proj.weight", expecting: [D, D])
             if config.useBias {
                 self.bQ = try load("attn.q_proj.bias", expecting: [1, 1, D])
-                self.bK = try load("attn.k_proj.bias", expecting: [1, 1, D])
-                self.bV = try load("attn.v_proj.bias", expecting: [1, 1, D])
+                self.bK = try load("attn.k_proj.bias", expecting: [1, 1, Dkv])
+                self.bV = try load("attn.v_proj.bias", expecting: [1, 1, Dkv])
                 self.bO = try load("attn.o_proj.bias", expecting: [1, 1, D])
             } else {
                 self.bQ = nil
@@ -229,6 +256,10 @@ public final class DecoderLM {
             _ = loadOptional  // silence unused-fn warning; kept for future knobs.
 
             self.config = config
+            // Cache stores the expanded (Hq-wide) K/V, because we
+            // expand BEFORE calling appendAndDecode. A smarter future
+            // version would store Hkv-wide and expand post-cache to
+            // save cache memory by factor G.
             self.cache = KVCache(config: .init(
                 batchSize: 1,
                 numHeads: config.numHeads,
@@ -258,25 +289,41 @@ public final class DecoderLM {
         /// Appends exactly one entry to this layer's KV cache.
         func step(_ x: Tensor) throws -> Tensor {
             let D = config.modelDim
-            let H = config.numHeads
+            let Hq = config.numHeads
+            let Hkv = config.numKVHeads
+            let G = config.gqaGroupSize     // = Hq / Hkv, 1 for MHA
             let Dh = config.headDim
             let pos = cache.length
 
             // Pre-norm + Q/K/V projections (biases optional).
+            // Q is [1, 1, D]; K, V are [1, 1, Hkv*Dh] (may be smaller under GQA).
             let normed1 = norm(x, weight: norm1Weight, bias: norm1Bias)
             let q = addOpt(normed1.matmul(wQ), bQ)
             let k = addOpt(normed1.matmul(wK), bK)
             let v = addOpt(normed1.matmul(wV), bV)
 
-            // Split heads → RoPE(Q, K) → cached attention → merge.
-            func splitHeads(_ t: Tensor) -> Tensor {
-                t.reshape([1, 1, H, Dh])
+            // Split heads (different head counts for Q vs K/V under GQA).
+            func splitHeads(_ t: Tensor, heads: Int) -> Tensor {
+                t.reshape([1, 1, heads, Dh])
                  .permute([0, 2, 1, 3])
                  .contiguous()
             }
-            let qH = splitHeads(q).rope(startPos: pos, base: config.ropeBase)
-            let kH = splitHeads(k).rope(startPos: pos, base: config.ropeBase)
-            let vH = splitHeads(v)
+            let qH = splitHeads(q, heads: Hq).rope(startPos: pos, base: config.ropeBase)
+            let kHkv = splitHeads(k, heads: Hkv).rope(startPos: pos, base: config.ropeBase)
+            let vHkv = splitHeads(v, heads: Hkv)
+
+            // For GQA, broadcast each of Hkv K/V heads to G consecutive
+            // Q heads so cache.appendAndDecode sees matched shapes.
+            // For MHA (G == 1) we skip the (no-op) expansion.
+            let kH: Tensor
+            let vH: Tensor
+            if G == 1 {
+                kH = kHkv
+                vH = vHkv
+            } else {
+                kH = kHkv.repeatInterleave(dim: 1, repeats: G)
+                vH = vHkv.repeatInterleave(dim: 1, repeats: G)
+            }
 
             let attended = try cache.appendAndDecode(
                 query: qH, key: kH, value: vH,

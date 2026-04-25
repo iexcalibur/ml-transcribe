@@ -30,6 +30,10 @@ guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) el
     exit(1)
 }
 
+// Look for `--keep-f16` anywhere in the args; if present, F16 source
+// tensors stay as F16 in storage (halving resident memory).
+let keepF16 = CommandLine.arguments.contains("--keep-f16")
+
 let weights: SafetensorsWeights
 do {
     if isDirectory.boolValue {
@@ -37,12 +41,13 @@ do {
             shardedDirectory: URL(fileURLWithPath: path)
         )
     } else {
-        weights = try SafetensorsWeights(path: path)
+        weights = try SafetensorsWeights(path: path, keepF16: keepF16)
     }
 } catch {
     fputs("error: failed to load: \(error)\n", stderr)
     exit(1)
 }
+if keepF16 { print("(loaded with --keep-f16: F16 source tensors kept as F16 in store)") }
 
 print("===== \(path) =====")
 print("Total tensors: \(weights.count)\n")
@@ -115,17 +120,31 @@ for (shape, count) in shapeCounts.sorted(by: { $0.value > $1.value }).prefix(8) 
 // If the rename/transpose machinery is correct, construction succeeds
 // and we can run one forward step.
 // ---------------------------------------------------------------------------
-if CommandLine.arguments.count >= 7,
-   CommandLine.arguments[2] == "--load-llama",
+// ---------------------------------------------------------------------------
+// `--gen-llama D F H L Hkv tokenizer.json "<prompt>" maxTokens`
+//
+// Full proof loop: tokenize text → embed → run all N transformer
+// layers with KV cache → argmax → decode → print.
+//
+// On CPU this is ~1–2 sec per token for a 1B-class model, so a 30-
+// token demo runs in 30–60 seconds.
+// ---------------------------------------------------------------------------
+if CommandLine.arguments.count >= 11,
+   CommandLine.arguments[2] == "--gen-llama",
    let D = Int(CommandLine.arguments[3]),
    let F = Int(CommandLine.arguments[4]),
    let H = Int(CommandLine.arguments[5]),
-   let L = Int(CommandLine.arguments[6])
+   let L = Int(CommandLine.arguments[6]),
+   let Hkv = Int(CommandLine.arguments[7]),
+   let maxTokens = Int(CommandLine.arguments[10])
 {
-    // Infer vocab size from the embedding if present.
+    let tokenizerPath = CommandLine.arguments[8]
+    let prompt        = CommandLine.arguments[9]
     let embedName = "model.embed_tokens.weight"
     let vocab = weights[embedName]?.shape.first ?? 0
-    print("\n--- Attempting LLaMA load: D=\(D) F=\(F) H=\(H) L=\(L) V=\(vocab) ---")
+    print("\n--- Generating: D=\(D) F=\(F) H=\(H) Hkv=\(Hkv) L=\(L) V=\(vocab) ---")
+    print("    prompt: \"\(prompt)\"")
+    print("    max new tokens: \(maxTokens)")
 
     let mapped = WeightMap(
         source: weights,
@@ -134,7 +153,70 @@ if CommandLine.arguments.count >= 7,
     )
     let config = DecoderLM.Config.llamaStyle(
         vocabSize: vocab, modelDim: D, numHeads: H, ffnDim: F,
-        numLayers: L, maxSeqLen: 128
+        numLayers: L, maxSeqLen: 256, numKVHeads: Hkv
+    )
+
+    do {
+        let lm = try DecoderLM(weights: mapped, config: config)
+        let tokenizer = try Tokenizer(path: tokenizerPath)
+
+        let promptIds = try tokenizer.encode(prompt, addSpecialTokens: true)
+        print("    prompt tokens (\(promptIds.count)): \(promptIds)")
+
+        let start = Date()
+        let generated = try lm.generate(
+            prompt: promptIds.map { Int($0) },
+            maxNewTokens: maxTokens
+        )
+        let elapsed = Date().timeIntervalSince(start)
+
+        print("    generated tokens: \(generated)")
+        let decoded = try tokenizer.decode(
+            generated.map { UInt32($0) },
+            skipSpecialTokens: true
+        )
+        let full = try tokenizer.decode(
+            (promptIds.map { Int($0) } + generated).map { UInt32($0) },
+            skipSpecialTokens: true
+        )
+        print("\n--- result ---")
+        print("continuation: \"\(decoded)\"")
+        print("\nfull: \"\(full)\"")
+        print(String(
+            format: "\n(%.1f sec total, %.2f sec/token)",
+            elapsed, elapsed / Double(maxTokens)
+        ))
+    } catch {
+        print("✗ Generation failed: \(error)")
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.count >= 7,
+   CommandLine.arguments[2] == "--load-llama",
+   let D = Int(CommandLine.arguments[3]),
+   let F = Int(CommandLine.arguments[4]),
+   let H = Int(CommandLine.arguments[5]),
+   let L = Int(CommandLine.arguments[6])
+{
+    // Optional 5th positional: num_key_value_heads (for GQA).
+    // If omitted, defaults to H (= plain MHA).
+    let Hkv: Int? = CommandLine.arguments.count >= 8
+        ? Int(CommandLine.arguments[7])
+        : nil
+    let embedName = "model.embed_tokens.weight"
+    let vocab = weights[embedName]?.shape.first ?? 0
+    let kvDescr = Hkv.map { " Hkv=\($0)" } ?? ""
+    print("\n--- Attempting LLaMA load: D=\(D) F=\(F) H=\(H)\(kvDescr) L=\(L) V=\(vocab) ---")
+
+    let mapped = WeightMap(
+        source: weights,
+        renames: WeightMap.huggingFaceLlamaRenames(numLayers: L),
+        transpose: WeightMap.huggingFaceLlamaTransposeSet(numLayers: L)
+    )
+    let config = DecoderLM.Config.llamaStyle(
+        vocabSize: vocab, modelDim: D, numHeads: H, ffnDim: F,
+        numLayers: L, maxSeqLen: 128, numKVHeads: Hkv
     )
     do {
         let lm = try DecoderLM(weights: mapped, config: config)

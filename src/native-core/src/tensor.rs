@@ -1,8 +1,34 @@
 use crate::allocator::CachingAllocator;
+use half::f16;
 use rand::Rng;
 use rand_distr::StandardNormal;
 
 pub type TensorId = usize;
+
+/// On-device storage dtype for a tensor.
+///
+/// Today only `F32` and `F16` are first-class — F16 is for storing
+/// weights compactly (half the memory of F32). Ops still operate on
+/// F32; F16 tensors are materialized to F32 transiently inside
+/// `to_host`, so the F16 storage halves the *resident* memory of
+/// loaded weights without any per-op API changes.
+///
+/// BF16 is decoded to F32 at load time (via `io::safetensors`); we
+/// don't currently keep it in storage. Add when needed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Dtype {
+    F32,
+    F16,
+}
+
+impl Dtype {
+    pub fn size_in_bytes(&self) -> usize {
+        match self {
+            Dtype::F32 => 4,
+            Dtype::F16 => 2,
+        }
+    }
+}
 
 pub fn compute_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![0usize; shape.len()];
@@ -26,7 +52,15 @@ pub fn shape_size(shape: &[usize]) -> usize {
 
 #[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub struct GpuTensor {
+    /// F32 payload. Populated for `Dtype::F32` tensors; left empty for
+    /// `Dtype::F16` tensors (which store their values in `data_f16`).
     pub data: Vec<f32>,
+    /// F16 payload. Populated for `Dtype::F16` tensors; empty otherwise.
+    /// Two bytes per element instead of four — half the resident memory
+    /// for loaded weight matrices.
+    pub data_f16: Vec<f16>,
+    /// Which payload is the source of truth.
+    pub dtype: Dtype,
     pub shape: Vec<usize>,
     pub strides: Vec<usize>,
     pub size: usize,
@@ -50,6 +84,14 @@ impl GpuTensor {
             expected *= self.shape[i];
         }
         true
+    }
+
+    /// Number of elements in the live payload (regardless of dtype).
+    pub fn numel_storage(&self) -> usize {
+        match self.dtype {
+            Dtype::F32 => self.data.len(),
+            Dtype::F16 => self.data_f16.len(),
+        }
     }
 }
 
@@ -186,25 +228,54 @@ impl TensorStore {
         }
     }
 
+    /// Direct F32 borrow. Panics on F16 tensors — use `to_host` if you
+    /// need a dtype-agnostic copy. Only valid for ops that mutate
+    /// (training-time): forward-path ops should use `to_host` instead.
     pub fn data(&self, id: TensorId) -> &[f32] {
-        &self.get(id).data
+        let t = self.get(id);
+        debug_assert_eq!(
+            t.dtype, Dtype::F32,
+            "TensorStore::data() called on a non-F32 tensor; use to_host()"
+        );
+        &t.data
     }
 
     pub fn data_mut(&mut self, id: TensorId) -> &mut [f32] {
-        &mut self.get_mut(id).data
+        let t = self.get_mut(id);
+        debug_assert_eq!(
+            t.dtype, Dtype::F32,
+            "TensorStore::data_mut() called on a non-F32 tensor"
+        );
+        &mut t.data
     }
 
+    /// Read the tensor's elements as a contiguous `Vec<f32>`,
+    /// regardless of the underlying storage dtype. F16 tensors are
+    /// up-converted on the fly; the caller's Vec is dropped at end of
+    /// scope, so memory peaks transiently but the F16 storage stays
+    /// resident for the next call.
     pub fn to_host(&self, id: TensorId) -> Vec<f32> {
         let t = self.get(id);
-        if t.is_contiguous() {
-            t.data.clone()
-        } else {
-            self.make_contiguous_data(id)
+        match t.dtype {
+            Dtype::F32 => {
+                if t.is_contiguous() { t.data.clone() }
+                else { self.make_contiguous_data(id) }
+            }
+            Dtype::F16 => {
+                // F16 is always stored contiguous (we never permute it
+                // without converting back to F32 first), so a simple
+                // map-collect suffices.
+                t.data_f16.iter().map(|&h| h.to_f32()).collect()
+            }
         }
     }
 
     pub fn get_scalar(&self, id: TensorId) -> f32 {
-        self.get(id).data[0]
+        let t = self.get(id);
+        match t.dtype {
+            Dtype::F32 => t.data[0],
+            Dtype::F16 => t.data_f16[0].to_f32(),
+        }
     }
 
     pub fn zero_grad(&mut self, id: TensorId) {
@@ -224,6 +295,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 
@@ -235,6 +307,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 
@@ -247,6 +320,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 
@@ -259,6 +333,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 
@@ -270,6 +345,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 
@@ -279,7 +355,64 @@ impl TensorStore {
         self.insert(GpuTensor {
             data: src, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
+    }
+
+    /// Build an F16-storage tensor from a caller-owned Vec. The bytes
+    /// stay as F16; ops up-convert transiently via `to_host`. This is
+    /// the load path for keeping fp16 model weights at half the F32
+    /// memory cost.
+    pub fn from_vec_f16(&mut self, src: Vec<f16>, shape: &[usize]) -> TensorId {
+        let size = shape_size(shape);
+        let strides = compute_strides(shape);
+        self.insert(GpuTensor {
+            data: Vec::new(),
+            data_f16: src,
+            dtype: Dtype::F16,
+            shape: shape.to_vec(), strides, size,
+            requires_grad: false, grad: None, adam_m: None, adam_v: None,
+        })
+    }
+
+    /// Return the storage dtype of the tensor at `id`.
+    pub fn dtype(&self, id: TensorId) -> Dtype {
+        self.get(id).dtype
+    }
+
+    /// Produce a new tensor whose storage matches `target`. F32 → F16
+    /// halves the resident memory (with rounding). F16 → F32 doubles
+    /// it but lets every op consume the tensor without per-call
+    /// up-conversion.
+    ///
+    /// No-op (returns `id` unchanged) when the tensor is already in
+    /// the requested dtype.
+    pub fn cast(&mut self, id: TensorId, target: Dtype) -> TensorId {
+        let src = self.get(id);
+        if src.dtype == target {
+            return id;
+        }
+        let shape = src.shape.clone();
+        match target {
+            Dtype::F32 => {
+                // F16 → F32: lift bytes into F32 storage.
+                let data: Vec<f32> = src.data_f16.iter().map(|&h| h.to_f32()).collect();
+                self.from_vec(data, &shape)
+            }
+            Dtype::F16 => {
+                // F32 → F16: round each element. We materialize a
+                // contiguous source first to keep strides simple.
+                let f32_data = if src.is_contiguous() {
+                    src.data.clone()
+                } else {
+                    self.make_contiguous_data(id)
+                };
+                let f16_data: Vec<f16> = f32_data.iter()
+                    .map(|&x| f16::from_f32(x))
+                    .collect();
+                self.from_vec_f16(f16_data, &shape)
+            }
+        }
     }
 
     pub fn accumulate_grad(&mut self, dst: TensorId, src: TensorId) {
@@ -308,15 +441,32 @@ impl TensorStore {
         let ndim = t.shape.len();
         let mut out = vec![0.0f32; size];
         let out_strides = compute_strides(&t.shape);
-        for i in 0..size {
-            let mut src_idx = 0;
-            let mut rem = i;
-            for d in 0..ndim {
-                let coord = rem / out_strides[d];
-                rem %= out_strides[d];
-                src_idx += coord * t.strides[d];
+        match t.dtype {
+            Dtype::F32 => {
+                for i in 0..size {
+                    let mut src_idx = 0;
+                    let mut rem = i;
+                    for d in 0..ndim {
+                        let coord = rem / out_strides[d];
+                        rem %= out_strides[d];
+                        src_idx += coord * t.strides[d];
+                    }
+                    out[i] = t.data[src_idx];
+                }
             }
-            out[i] = t.data[src_idx];
+            Dtype::F16 => {
+                // F16 storage: gather + up-convert per element.
+                for i in 0..size {
+                    let mut src_idx = 0;
+                    let mut rem = i;
+                    for d in 0..ndim {
+                        let coord = rem / out_strides[d];
+                        rem %= out_strides[d];
+                        src_idx += coord * t.strides[d];
+                    }
+                    out[i] = t.data_f16[src_idx].to_f32();
+                }
+            }
         }
         out
     }
@@ -429,6 +579,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 
@@ -439,6 +590,7 @@ impl TensorStore {
         let id = self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         });
         let dev = crate::device::GpuDevice::instance();
         let ptr = dev.ptr(&self.get(id).data);
@@ -478,6 +630,7 @@ impl TensorStore {
         self.insert(GpuTensor {
             data, shape: shape.to_vec(), strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
+            data_f16: Vec::new(), dtype: Dtype::F32,
         })
     }
 

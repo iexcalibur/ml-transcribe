@@ -34,7 +34,7 @@ use mni_framework_core::autograd::Tape;
 use mni_framework_core::io::safetensors;
 use mni_framework_core::ops;
 use mni_framework_core::ops::kv_cache::{KvCache, KvCacheConfig};
-use mni_framework_core::tensor::{TensorId, TensorStore};
+use mni_framework_core::tensor::{Dtype, TensorId, TensorStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -179,16 +179,17 @@ pub unsafe extern "C" fn ml_engine_shape_copy(id: u32, out: *mut u64, out_len: u
     n
 }
 
-/// Sum of all elements. Reduces the raw data buffer — does not touch
-/// the autograd tape.
+/// Sum of all elements. Works on both F32 and F16 storage (F16 is
+/// up-converted to F32 transiently inside `to_host`).
 #[no_mangle]
 pub extern "C" fn ml_engine_sum(id: u32) -> f32 {
     let eng = engine().lock().unwrap();
-    eng.store.data(id as TensorId).iter().sum()
+    eng.store.to_host(id as TensorId).iter().sum()
 }
 
-/// Copy the tensor's row-major data into a caller-provided `f32` buffer.
-/// Returns the element count actually written.
+/// Copy the tensor's row-major data into a caller-provided `f32`
+/// buffer. F16 storage is up-converted on the way out. Returns the
+/// element count actually written.
 ///
 /// # Safety
 /// `out` must point to writable memory for `out_len` `f32` values.
@@ -198,7 +199,7 @@ pub unsafe extern "C" fn ml_engine_copy_into(id: u32, out: *mut f32, out_len: u6
         return 0;
     }
     let eng = engine().lock().unwrap();
-    let data = eng.store.data(id as TensorId);
+    let data = eng.store.to_host(id as TensorId);
     let n = std::cmp::min(data.len() as u64, out_len);
     std::ptr::copy_nonoverlapping(data.as_ptr(), out, n as usize);
     n
@@ -210,6 +211,47 @@ pub unsafe extern "C" fn ml_engine_copy_into(id: u32, out: *mut f32, out_len: u6
 pub extern "C" fn ml_engine_release(id: u32) {
     let mut eng = engine().lock().unwrap();
     eng.store.free(id as TensorId);
+}
+
+// ---------------------------------------------------------------------------
+// Dtype: F16 storage + cast.
+//
+// Encoded as a `u32` over the FFI: 0 = F32, 1 = F16. (Adding BF16
+// later only needs a new code; the wire format stays stable.)
+// ---------------------------------------------------------------------------
+
+const DTYPE_F32: u32 = 0;
+const DTYPE_F16: u32 = 1;
+
+fn encode_dtype(d: Dtype) -> u32 {
+    match d { Dtype::F32 => DTYPE_F32, Dtype::F16 => DTYPE_F16 }
+}
+
+fn decode_dtype(d: u32) -> Option<Dtype> {
+    match d {
+        DTYPE_F32 => Some(Dtype::F32),
+        DTYPE_F16 => Some(Dtype::F16),
+        _ => None,
+    }
+}
+
+/// Storage dtype of the tensor at `id`. Returns `u32::MAX` on unknown id.
+#[no_mangle]
+pub extern "C" fn ml_engine_dtype(id: u32) -> u32 {
+    let eng = engine().lock().unwrap();
+    encode_dtype(eng.store.dtype(id as TensorId))
+}
+
+/// Cast a tensor to a different storage dtype. Returns the new id, or
+/// the same id when the source is already in the requested dtype, or
+/// `INVALID_ID` if the dtype code is unrecognized.
+#[no_mangle]
+pub extern "C" fn ml_engine_cast_dtype(id: u32, target_dtype: u32) -> u32 {
+    let Some(target) = decode_dtype(target_dtype) else {
+        return INVALID_ID;
+    };
+    let mut eng = engine().lock().unwrap();
+    eng.store.cast(id as TensorId, target) as u32
 }
 
 // ===========================================================================
@@ -387,6 +429,67 @@ pub extern "C" fn ml_engine_contiguous(a: u32) -> u32 {
     ops::layout::contiguous(a as TensorId, store, tape) as u32
 }
 
+/// Repeat each slice along `dim` `repeats` times, consecutively
+/// (PyTorch's `torch.repeat_interleave`).
+///
+/// For input shape `[d0, d1, ..., dn]` and `dim = k`, output shape is
+/// `[d0, ..., d_{k-1}, d_k * repeats, d_{k+1}, ..., dn]`.
+///
+/// Layout: index `i` along `dim` in the input produces indices
+/// `[i*repeats, i*repeats + 1, ..., (i+1)*repeats - 1]` in the output.
+///
+/// Primary use case: GQA expansion. A K or V tensor of shape
+/// `[B, H_kv, S, D_h]` becomes `[B, H_kv*G, S, D_h] = [B, H_q, S, D_h]`
+/// via `repeat_interleave(dim=1, repeats=G)`, which broadcasts each
+/// KV head to the `G = H_q / H_kv` consecutive Q heads it serves.
+///
+/// Negative `dim` counts from the end, matching PyTorch.
+/// Returns `INVALID_ID` on out-of-range `dim` or `repeats == 0`.
+#[no_mangle]
+pub extern "C" fn ml_engine_repeat_interleave(
+    x: u32,
+    dim: i32,
+    repeats: u32,
+) -> u32 {
+    if repeats == 0 {
+        return INVALID_ID;
+    }
+    let mut eng = engine().lock().unwrap();
+    let x_shape = eng.store.shape(x as TensorId).to_vec();
+    let ndim = x_shape.len() as i32;
+    let actual_dim = if dim < 0 { ndim + dim } else { dim };
+    if actual_dim < 0 || actual_dim as usize >= x_shape.len() {
+        return INVALID_ID;
+    }
+    let dim_i = actual_dim as usize;
+    let repeats = repeats as usize;
+    let dim_size = x_shape[dim_i];
+
+    let mut new_shape = x_shape.clone();
+    new_shape[dim_i] = dim_size * repeats;
+
+    let outer: usize = x_shape[..dim_i].iter().product();
+    let inner: usize = x_shape[dim_i + 1..].iter().product();
+    let src_slab = dim_size * inner;
+    let dst_slab = dim_size * repeats * inner;
+
+    let x_data = eng.store.to_host(x as TensorId);
+    let mut out = vec![0.0f32; outer * dst_slab];
+
+    for o in 0..outer {
+        for d in 0..dim_size {
+            let src_off = o * src_slab + d * inner;
+            for r in 0..repeats {
+                let dst_off = o * dst_slab + (d * repeats + r) * inner;
+                out[dst_off..dst_off + inner]
+                    .copy_from_slice(&x_data[src_off..src_off + inner]);
+            }
+        }
+    }
+
+    eng.store.from_slice(&out, &new_shape) as u32
+}
+
 // ===========================================================================
 // FFI: embedding lookup
 // ===========================================================================
@@ -488,8 +591,8 @@ pub extern "C" fn ml_engine_rmsnorm(x: u32, gamma: u32, eps: f32) -> u32 {
         return INVALID_ID;
     }
 
-    let x_data = eng.store.data(x as TensorId).to_vec();
-    let gamma_data = eng.store.data(gamma as TensorId).to_vec();
+    let x_data = eng.store.to_host(x as TensorId);
+    let gamma_data = eng.store.to_host(gamma as TensorId);
 
     let numel = x_data.len();
     let n = numel / c; // number of rows along the last dim
@@ -529,7 +632,7 @@ pub extern "C" fn ml_engine_rope(x: u32, start_pos: u64, base: f32) -> u32 {
     }
     let half = d / 2;
 
-    let x_data = eng.store.data(x as TensorId).to_vec();
+    let x_data = eng.store.to_host(x as TensorId);
     let numel = x_data.len();
     let batch_total = numel / (s * d);
     let mut out = vec![0.0f32; numel];
@@ -863,11 +966,35 @@ pub unsafe extern "C" fn ml_engine_safetensors_load(
     path_ptr: *const u8,
     path_len: u64,
 ) -> *mut LoadedWeightsHandle {
+    safetensors_load_inner(path_ptr, path_len, /*keep_f16=*/ false)
+}
+
+/// Like `ml_engine_safetensors_load`, but F16 source tensors are kept
+/// as F16 in storage (half the resident memory) instead of being
+/// up-converted to F32. F32 and BF16 source dtypes are still
+/// up-converted as before.
+///
+/// # Safety
+/// Same as `ml_engine_safetensors_load`.
+#[no_mangle]
+pub unsafe extern "C" fn ml_engine_safetensors_load_keep_f16(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> *mut LoadedWeightsHandle {
+    safetensors_load_inner(path_ptr, path_len, /*keep_f16=*/ true)
+}
+
+unsafe fn safetensors_load_inner(
+    path_ptr: *const u8,
+    path_len: u64,
+    keep_f16: bool,
+) -> *mut LoadedWeightsHandle {
     let Some(path) = path_from_ptr(path_ptr, path_len) else {
         return std::ptr::null_mut();
     };
     let mut eng = engine().lock().unwrap();
-    match safetensors::load_into(&path, &mut eng.store) {
+    let result = safetensors::load_into_with_dtype(&path, &mut eng.store, keep_f16);
+    match result {
         Ok(loaded) => Box::into_raw(Box::new(LoadedWeightsHandle(loaded))),
         Err(_) => std::ptr::null_mut(),
     }

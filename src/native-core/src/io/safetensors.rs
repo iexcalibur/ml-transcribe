@@ -5,7 +5,7 @@
 //! variants into `f32` on the way in. For save, F32 and F16 are
 //! supported; BF16 save can be added the same way if needed.
 
-use crate::tensor::{TensorId, TensorStore};
+use crate::tensor::{Dtype as StoreDtype, TensorId, TensorStore};
 use half::{bf16, f16};
 use safetensors::tensor::{Dtype, TensorView};
 use safetensors::SafeTensors;
@@ -121,6 +121,19 @@ pub fn load_into(
     path: &Path,
     store: &mut TensorStore,
 ) -> Result<LoadedWeights, SafetensorsError> {
+    load_into_with_dtype(path, store, /*keep_f16=*/ false)
+}
+
+/// Like `load_into`, but if `keep_f16` is true, F16 source tensors are
+/// stored as F16 in the engine (saving half the memory) instead of
+/// being up-converted to F32 on entry. F32 and BF16 source dtypes
+/// always produce F32 storage — F16 is the only dtype where the
+/// preserve flag has any effect.
+pub fn load_into_with_dtype(
+    path: &Path,
+    store: &mut TensorStore,
+    keep_f16: bool,
+) -> Result<LoadedWeights, SafetensorsError> {
     let bytes = std::fs::read(path)?;
     let st = SafeTensors::deserialize(&bytes)?;
 
@@ -130,8 +143,26 @@ pub fn load_into(
     for (name, view) in st.tensors() {
         let shape: Vec<usize> = view.shape().iter().map(|&d| d as usize).collect();
         let numel: usize = shape.iter().product();
-        let data = decode_to_f32(view.dtype(), view.data(), numel)?;
-        let id = store.from_slice(&data, &shape);
+        let id = if keep_f16 && view.dtype() == Dtype::F16 {
+            // Decode the raw bytes into Vec<f16> without an F32
+            // intermediate, then store as F16.
+            let raw = view.data();
+            if raw.len() != numel * 2 {
+                return Err(SafetensorsError::ShapeDataMismatch {
+                    expected_bytes: numel * 2,
+                    actual_bytes: raw.len(),
+                });
+            }
+            let data_f16: Vec<f16> = raw
+                .chunks_exact(2)
+                .map(|c| f16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            store.from_vec_f16(data_f16, &shape)
+        } else {
+            // Default path: everything ends up as F32 in the store.
+            let data = decode_to_f32(view.dtype(), view.data(), numel)?;
+            store.from_slice(&data, &shape)
+        };
         map.insert(name.to_string(), id);
         sorted_names.push(name.to_string());
     }
@@ -139,6 +170,14 @@ pub fn load_into(
     sorted_names.sort();
     Ok(LoadedWeights { map, sorted_names })
 }
+
+// `StoreDtype` is our crate's storage enum (F32 / F16) imported as
+// an alias at the top of the file; `Dtype` here refers to
+// safetensors' on-disk dtype enum (F32 / F16 / BF16 / I8 / etc).
+// We could phrase this more explicitly with a fully qualified path,
+// but the alias keeps the call sites readable.
+#[allow(dead_code)]
+fn _enforce_dtype_alias_use(_d: StoreDtype) {}
 
 // ---------------------------------------------------------------------------
 // Save
