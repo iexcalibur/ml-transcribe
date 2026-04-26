@@ -49,3 +49,4 @@ coverage/
 tmp/
 temp/
 pnpm-lock.yaml
+.claude/
