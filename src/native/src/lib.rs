@@ -528,11 +528,13 @@ pub fn bias_gelu(x: u32, bias: u32) -> u32 {
 
 #[napi]
 pub fn conv1d_forward(input: u32, weight: u32, stride: i64, padding: i64) -> u32 {
+    // N-API path stays groups=1; grouped convs are exposed via the
+    // Swift FFI which carries the `groups` arg explicitly.
     let mut e = engine().lock();
     let Engine { store, tape, .. } = &mut *e;
     ops::conv::conv1d_forward(
         input as TensorId, weight as TensorId,
-        stride as usize, padding as usize, store, tape,
+        stride as usize, padding as usize, 1, store, tape,
     ) as u32
 }
 
@@ -542,7 +544,7 @@ pub fn conv2d_forward(input: u32, weight: u32, stride: i64, padding: i64) -> u32
     let Engine { store, tape, .. } = &mut *e;
     ops::conv::conv2d_forward(
         input as TensorId, weight as TensorId,
-        stride as usize, padding as usize, store, tape,
+        stride as usize, padding as usize, 1, store, tape,
     ) as u32
 }
 

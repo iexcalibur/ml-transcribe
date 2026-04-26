@@ -533,15 +533,17 @@ pub extern "C" fn ml_engine_contiguous(a: u32) -> u32 {
 /// - output   shape `[N, C_out, L_out]`
 ///   where `L_out = (L + 2*padding - K) / stride + 1`.
 ///
-/// No bias and no groups (single-group / "dense" conv only). Apply
-/// bias separately via `.add(bias)`. Depthwise conv (groups == C_in)
-/// will be a follow-up FFI.
+/// No bias — apply bias separately via `.add(bias)`. `groups`
+/// partitions input/output channels: groups=1 is dense conv,
+/// groups=C_in (with C_out=C_in) is depthwise. Weight layout is
+/// PyTorch's `[C_out, C_in/groups, K]`.
 #[no_mangle]
 pub extern "C" fn ml_engine_conv1d(
     input: u32,
     weight: u32,
     stride: u64,
     padding: u64,
+    groups: u64,
 ) -> u32 {
     let mut eng = engine().lock().unwrap();
     let Engine { store, tape, .. } = &mut *eng;
@@ -550,9 +552,145 @@ pub extern "C" fn ml_engine_conv1d(
         weight as TensorId,
         stride as usize,
         padding as usize,
+        groups as usize,
         store,
         tape,
     ) as u32
+}
+
+/// 2-D convolution, PyTorch convention.
+///   input  [N, C_in,  H, W]
+///   weight [C_out, C_in/groups, kH, kW]
+///   output [N, C_out, H_out, W_out]
+/// where H_out = (H + 2*padding - kH) / stride + 1, same for W.
+///
+/// Single stride and padding value used for both spatial dims (which
+/// covers every Cohere ConvSubsampling layer). No bias.
+#[no_mangle]
+pub extern "C" fn ml_engine_conv2d(
+    input: u32,
+    weight: u32,
+    stride: u64,
+    padding: u64,
+    groups: u64,
+) -> u32 {
+    let mut eng = engine().lock().unwrap();
+    let Engine { store, tape, .. } = &mut *eng;
+    ops::conv::conv2d_forward(
+        input as TensorId,
+        weight as TensorId,
+        stride as usize,
+        padding as usize,
+        groups as usize,
+        store,
+        tape,
+    ) as u32
+}
+
+/// 1-D batch normalization (inference mode):
+///   y = (x - mean) / sqrt(var + eps) * gamma + beta
+///
+/// Input `x` shape `[N, C, L]`. `mean`, `var`, `gamma`, `beta` are
+/// each `[C]`. Eps is typically 1e-5.
+///
+/// Inference-only — uses the running stats baked into the weights
+/// and ignores the train-time mean/var update. Cohere's Conformer
+/// ConvModule stores `running_mean` and `running_var` directly in
+/// the safetensors file.
+#[no_mangle]
+pub extern "C" fn ml_engine_batchnorm1d(
+    x: u32,
+    running_mean: u32,
+    running_var: u32,
+    gamma: u32,
+    beta: u32,
+    eps: f32,
+) -> u32 {
+    let mut eng = engine().lock().unwrap();
+    let Engine { store, .. } = &mut *eng;
+
+    let x_shape = store.shape(x as TensorId).to_vec();
+    assert_eq!(x_shape.len(), 3, "batchnorm1d expects [N, C, L], got shape {:?}", x_shape);
+    let (n, c, l) = (x_shape[0], x_shape[1], x_shape[2]);
+
+    let x_data = store.to_host(x as TensorId);
+    let mean = store.to_host(running_mean as TensorId);
+    let var = store.to_host(running_var as TensorId);
+    let g = store.to_host(gamma as TensorId);
+    let b = store.to_host(beta as TensorId);
+
+    assert_eq!(mean.len(), c, "running_mean must have shape [C={}]", c);
+    assert_eq!(var.len(), c, "running_var must have shape [C={}]", c);
+    assert_eq!(g.len(), c, "gamma must have shape [C={}]", c);
+    assert_eq!(b.len(), c, "beta must have shape [C={}]", c);
+
+    // Pre-compute the per-channel scale/shift.
+    let mut scale = vec![0.0f32; c];
+    let mut shift = vec![0.0f32; c];
+    for ci in 0..c {
+        let inv_std = 1.0 / (var[ci] + eps).sqrt();
+        scale[ci] = g[ci] * inv_std;
+        shift[ci] = b[ci] - mean[ci] * scale[ci];
+    }
+
+    let mut out = vec![0.0f32; n * c * l];
+    for ni in 0..n {
+        for ci in 0..c {
+            let s = scale[ci];
+            let h = shift[ci];
+            let off = ni * c * l + ci * l;
+            for li in 0..l {
+                out[off + li] = x_data[off + li] * s + h;
+            }
+        }
+    }
+    store.from_vec(out, &[n, c, l]) as u32
+}
+
+/// Gated Linear Unit. Splits the input in half along `dim` (which
+/// must have an even size) and returns `first * sigmoid(second)`.
+///
+/// Used inside Conformer's ConvModule right after the pointwise
+/// expansion: `Conv1d(d, 2d, k=1)` then `glu(dim=1)` halves the
+/// channel count back to `d` while gating.
+///
+/// `dim` is signed so callers can pass `-1` for the last dim.
+#[no_mangle]
+pub extern "C" fn ml_engine_glu(x: u32, dim: i32) -> u32 {
+    let mut eng = engine().lock().unwrap();
+    let Engine { store, .. } = &mut *eng;
+
+    let shape = store.shape(x as TensorId).to_vec();
+    let nd = shape.len() as i32;
+    let d = if dim < 0 { dim + nd } else { dim };
+    assert!(d >= 0 && d < nd, "glu: dim {} out of range for ndim {}", dim, nd);
+    let dim = d as usize;
+    let s = shape[dim];
+    assert_eq!(s % 2, 0, "glu: dim={} size={} must be even", dim, s);
+    let half = s / 2;
+
+    // Decompose into (outer, dim, inner) for row-major iteration.
+    let outer: usize = shape[..dim].iter().product();
+    let inner: usize = shape[(dim + 1)..].iter().product();
+
+    let x_data = store.to_host(x as TensorId);
+    let mut out_shape = shape.clone();
+    out_shape[dim] = half;
+    let mut out = vec![0.0f32; outer * half * inner];
+
+    for o in 0..outer {
+        for i in 0..half {
+            for j in 0..inner {
+                let a_idx = o * s * inner + i * inner + j;
+                let b_idx = o * s * inner + (i + half) * inner + j;
+                let a = x_data[a_idx];
+                let b = x_data[b_idx];
+                let sigmoid = 1.0 / (1.0 + (-b).exp());
+                out[o * half * inner + i * inner + j] = a * sigmoid;
+            }
+        }
+    }
+    store.from_vec(out, &out_shape) as u32
 }
 
 /// Repeat each slice along `dim` `repeats` times, consecutively
@@ -798,6 +936,14 @@ pub extern "C" fn ml_engine_rope(x: u32, start_pos: u64, base: f32) -> u32 {
 /// Defaults match Whisper exactly: pass `sample_rate=16000`, `n_fft=400`,
 /// `hop_length=160`, `n_mels=80`.
 ///
+/// `normalize_mode` selects post-mel normalization:
+///   0 = Whisper: clamp to `[max-8, max]`, scale `(x+4)/4`. Bit-
+///       compatible with `openai/whisper`.
+///   1 = per-feature: subtract per-mel-bin mean, divide by per-mel-
+///       bin std (with a small epsilon). Matches NeMo / Cohere
+///       Transcribe's `normalize=per_feature`.
+///   2 = none: raw log10 magnitudes (1e-10 floor only).
+///
 /// Returns `INVALID_ID` on null `samples_ptr` or zero-length input.
 ///
 /// # Safety
@@ -811,17 +957,25 @@ pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
     n_fft: u64,
     hop_length: u64,
     n_mels: u64,
+    normalize_mode: u32,
 ) -> u32 {
     if samples_ptr.is_null() || samples_len == 0 {
         return INVALID_ID;
     }
     let samples = std::slice::from_raw_parts(samples_ptr, samples_len as usize);
+    let mode = match normalize_mode {
+        0 => audio::NormalizeMode::Whisper,
+        1 => audio::NormalizeMode::PerFeature,
+        2 => audio::NormalizeMode::None,
+        _ => audio::NormalizeMode::Whisper,
+    };
     let (data, shape) = audio::log_mel_spectrogram(
         samples,
         sample_rate,
         n_fft as usize,
         hop_length as usize,
         n_mels as usize,
+        mode,
     );
     let mut eng = engine().lock().unwrap();
     eng.store.from_slice(&data, &shape) as u32

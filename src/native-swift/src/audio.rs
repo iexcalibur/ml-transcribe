@@ -92,6 +92,19 @@ fn hann_window(n: usize) -> Vec<f32> {
     w
 }
 
+/// Post-log-mel normalization variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NormalizeMode {
+    /// Clamp to `[max - 8, max]`, then `(x + 4) / 4`. Matches
+    /// `openai/whisper` bit-for-bit.
+    Whisper,
+    /// Per-mel-bin zero-mean / unit-variance. Matches NeMo /
+    /// Cohere Transcribe's `normalize=per_feature`.
+    PerFeature,
+    /// Raw log10 with the 1e-10 floor; no further scaling.
+    None,
+}
+
 /// Produce a log-mel spectrogram from `samples` at `sample_rate` Hz.
 ///
 /// Output shape: `[n_mels, n_frames]` row-major. `n_frames` depends
@@ -100,16 +113,15 @@ fn hann_window(n: usize) -> Vec<f32> {
 /// (with reflective padding at the edges, matching librosa /
 /// torchaudio defaults — n_frames = `n_samples / hop` rounded up).
 ///
-/// Normalization: log10 magnitude with a 1e-10 floor, then clamped
-/// to [max - 8, max], then scaled `(x + 4) / 4`. This matches
-/// Whisper's preprocessing exactly so its weights work with no
-/// further normalization on our side.
+/// `mode` selects the post-spectrogram normalization. See
+/// `NormalizeMode` for the three variants.
 pub fn log_mel_spectrogram(
     samples: &[f32],
     sample_rate: u32,
     n_fft: usize,
     hop_length: usize,
     n_mels: usize,
+    mode: NormalizeMode,
 ) -> (Vec<f32>, Vec<usize>) {
     // 1. Pad reflectively by n_fft/2 on each side so the first/last
     //    frames are centered — matches `center=True` in librosa.
@@ -166,12 +178,43 @@ pub fn log_mel_spectrogram(
         *x = x.max(1e-10).log10();
     }
 
-    // 6. Whisper normalization: clamp to [max - 8, max], then (x+4)/4.
-    let max_val = mel.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let floor = max_val - 8.0;
-    for x in mel.iter_mut() {
-        *x = x.max(floor);
-        *x = (*x + 4.0) / 4.0;
+    // 6. Mode-specific normalization.
+    match mode {
+        NormalizeMode::Whisper => {
+            // Clamp to [max - 8, max], then (x+4)/4.
+            let max_val = mel.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let floor = max_val - 8.0;
+            for x in mel.iter_mut() {
+                *x = x.max(floor);
+                *x = (*x + 4.0) / 4.0;
+            }
+        }
+        NormalizeMode::PerFeature => {
+            // Per-mel-bin zero-mean / unit-variance across frames.
+            // mel layout is [n_mels, n_frames]; each row is one bin.
+            let inv_n = 1.0 / (n_frames as f32);
+            for m in 0..n_mels {
+                let row_off = m * n_frames;
+                let mut mean = 0.0f32;
+                for f in 0..n_frames {
+                    mean += mel[row_off + f];
+                }
+                mean *= inv_n;
+                let mut var = 0.0f32;
+                for f in 0..n_frames {
+                    let d = mel[row_off + f] - mean;
+                    var += d * d;
+                }
+                var *= inv_n;
+                let inv_std = 1.0 / (var.sqrt() + 1e-5);
+                for f in 0..n_frames {
+                    mel[row_off + f] = (mel[row_off + f] - mean) * inv_std;
+                }
+            }
+        }
+        NormalizeMode::None => {
+            // Already log10 + 1e-10 floor; no further scaling.
+        }
     }
 
     (mel, vec![n_mels, n_frames])
@@ -186,7 +229,8 @@ mod tests {
     #[test]
     fn mel_of_dc_signal_is_finite() {
         let samples = vec![1.0f32; 16000]; // 1 second of DC at 16 kHz
-        let (mel, shape) = log_mel_spectrogram(&samples, 16000, 400, 160, 80);
+        let (mel, shape) = log_mel_spectrogram(
+            &samples, 16000, 400, 160, 80, NormalizeMode::Whisper);
         assert_eq!(shape, vec![80, 101]);
         for &x in mel.iter() {
             assert!(x.is_finite(), "non-finite value in mel: {}", x);
@@ -204,7 +248,8 @@ mod tests {
         let samples: Vec<f32> = (0..n)
             .map(|i| (2.0 * std::f32::consts::PI * freq * (i as f32) / (sr as f32)).sin())
             .collect();
-        let (mel, shape) = log_mel_spectrogram(&samples, sr, 400, 160, 80);
+        let (mel, shape) = log_mel_spectrogram(
+            &samples, sr, 400, 160, 80, NormalizeMode::Whisper);
         assert_eq!(shape, vec![80, 101]);
 
         // Average energy per mel bin (across frames). Find the argmax.
@@ -223,5 +268,36 @@ mod tests {
         // the lower half of the mel range.
         assert!(argmax < 40,
             "440 Hz sine should peak in lower mel bins, got bin {}", argmax);
+    }
+
+    /// Per-feature normalization should produce zero mean and unit
+    /// variance for each mel bin (within numerical tolerance).
+    #[test]
+    fn mel_per_feature_yields_zero_mean_unit_var() {
+        // Use a non-trivial signal so the per-bin distribution has
+        // some spread to normalize.
+        let sr = 16000u32;
+        let n = 16000usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 880.0 * t).sin()
+            })
+            .collect();
+        let (mel, shape) = log_mel_spectrogram(
+            &samples, sr, 400, 160, 80, NormalizeMode::PerFeature);
+        let n_mels = shape[0];
+        let n_frames = shape[1];
+        for m in 0..n_mels {
+            let row = &mel[m * n_frames..(m + 1) * n_frames];
+            let mean: f32 = row.iter().sum::<f32>() / n_frames as f32;
+            let var: f32 = row.iter()
+                .map(|x| (x - mean) * (x - mean)).sum::<f32>() / n_frames as f32;
+            assert!(mean.abs() < 1e-3, "bin {}: mean={} not ~0", m, mean);
+            // var ~= 1 - eps_inflation; tolerate 5% slop.
+            assert!((var - 1.0).abs() < 0.05,
+                "bin {}: var={} not ~1", m, var);
+        }
     }
 }

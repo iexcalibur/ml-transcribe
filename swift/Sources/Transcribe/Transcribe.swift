@@ -355,18 +355,74 @@ public final class Tensor {
 
     /// 1-D convolution. PyTorch convention:
     /// - `self`   shape `[N, C_in,  L]`
-    /// - `weight` shape `[C_out, C_in, K]`
+    /// - `weight` shape `[C_out, C_in/groups, K]`
     /// - output   shape `[N, C_out, L_out]` where
     ///   `L_out = (L + 2*padding - K) / stride + 1`.
     ///
-    /// No bias and no groups in this op — add bias separately via
-    /// `.add(bias)`. Depthwise conv (where groups == C_in) is a
-    /// future FFI; for now `weight` must use a single-group
-    /// (dense) layout.
-    public func conv1d(weight: Tensor, stride: Int = 1, padding: Int = 0) -> Tensor {
+    /// No bias — add it separately via `.add(bias)`. `groups=1` is
+    /// dense conv (default); `groups=C_in` (with `C_out=C_in`) is
+    /// depthwise — used inside Conformer's ConvModule.
+    public func conv1d(
+        weight: Tensor,
+        stride: Int = 1,
+        padding: Int = 0,
+        groups: Int = 1
+    ) -> Tensor {
         Tensor(id: ml_engine_conv1d(
-            self.id, weight.id, UInt64(stride), UInt64(padding)
+            self.id, weight.id,
+            UInt64(stride), UInt64(padding), UInt64(groups)
         ))
+    }
+
+    /// 2-D convolution. PyTorch convention:
+    /// - `self`   shape `[N, C_in,  H, W]`
+    /// - `weight` shape `[C_out, C_in/groups, kH, kW]`
+    /// - output   shape `[N, C_out, H_out, W_out]`.
+    ///
+    /// Single `stride` and `padding` apply to both spatial dims —
+    /// covers every Cohere ConvSubsampling layer. `groups=1` is dense;
+    /// `groups=C_in` (with `C_out=C_in`) is depthwise. No bias.
+    public func conv2d(
+        weight: Tensor,
+        stride: Int = 1,
+        padding: Int = 0,
+        groups: Int = 1
+    ) -> Tensor {
+        Tensor(id: ml_engine_conv2d(
+            self.id, weight.id,
+            UInt64(stride), UInt64(padding), UInt64(groups)
+        ))
+    }
+
+    /// 1-D batch normalization, inference mode:
+    ///   `y = (x - running_mean) / sqrt(running_var + eps) * gamma + beta`
+    ///
+    /// `self` is `[N, C, L]`; `runningMean`, `runningVar`, `gamma`,
+    /// `beta` are each `[C]`. Cohere's Conformer ConvModule stores
+    /// running stats directly in the safetensors file.
+    public func batchNorm1d(
+        runningMean: Tensor,
+        runningVar: Tensor,
+        gamma: Tensor,
+        beta: Tensor,
+        eps: Float = 1e-5
+    ) -> Tensor {
+        Tensor(id: ml_engine_batchnorm1d(
+            self.id,
+            runningMean.id, runningVar.id,
+            gamma.id, beta.id, eps
+        ))
+    }
+
+    /// Gated Linear Unit. Splits along `dim` (whose size must be
+    /// even) and returns `firstHalf * sigmoid(secondHalf)`. Output
+    /// shape matches input with the `dim` size halved.
+    ///
+    /// Negative `dim` counts from the end. Used inside Conformer's
+    /// ConvModule after the pointwise expansion `Conv1d(d, 2d, k=1)`
+    /// to halve the channel count back to `d` while gating.
+    public func glu(dim: Int = -1) -> Tensor {
+        Tensor(id: ml_engine_glu(self.id, Int32(dim)))
     }
 
     /// PyTorch's `repeat_interleave`: duplicates each slice along `dim`

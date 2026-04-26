@@ -13,19 +13,29 @@ fn launch_cfg(n: u32) -> LaunchConfig {
 }
 
 // =========================================================================
-// Conv1d: input [N,C_in,L], weight [C_out,C_in,K] -> [N,C_out,L_out]
+// Conv1d: input [N,C_in,L], weight [C_out,C_in/groups,K] -> [N,C_out,L_out]
+//
+// `groups` partitions input/output channels. groups=1 is the standard
+// dense conv. groups=C_in (with C_out=C_in) is depthwise separable —
+// each input channel maps to its own output channel(s). Conformer's
+// ConvModule uses depthwise here. PyTorch conventions throughout.
 // =========================================================================
 
 #[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn conv1d_forward(
     input: TensorId, weight: TensorId,
-    stride: usize, padding: usize,
+    stride: usize, padding: usize, groups: usize,
     store: &mut TensorStore, tape: &mut Tape,
 ) -> TensorId {
     let inp_shape = store.shape(input).to_vec();
     let w_shape = store.shape(weight).to_vec();
     let (n, c_in, l) = (inp_shape[0], inp_shape[1], inp_shape[2]);
-    let (c_out, _, k) = (w_shape[0], w_shape[1], w_shape[2]);
+    let (c_out, c_in_per_g, k) = (w_shape[0], w_shape[1], w_shape[2]);
+    assert!(groups >= 1, "groups must be >= 1");
+    assert_eq!(c_in_per_g * groups, c_in,
+        "groups={} must divide c_in={} so that weight[1] * groups = c_in", groups, c_in);
+    assert_eq!(c_out % groups, 0, "groups={} must divide c_out={}", groups, c_out);
+    let c_out_per_g = c_out / groups;
     let l_out = (l + 2 * padding - k) / stride + 1;
 
     let inp_data = store.to_host(input);
@@ -34,14 +44,17 @@ pub fn conv1d_forward(
 
     for ni in 0..n {
         for co in 0..c_out {
+            // Which group this output channel belongs to.
+            let g = co / c_out_per_g;
             for ol in 0..l_out {
                 let mut sum = 0.0f32;
-                for ci in 0..c_in {
+                for cig in 0..c_in_per_g {
+                    let ci = g * c_in_per_g + cig;
                     for ki in 0..k {
                         let il = (ol * stride) as isize - padding as isize + ki as isize;
                         if il >= 0 && (il as usize) < l {
                             sum += inp_data[ni * c_in * l + ci * l + il as usize]
-                                 * w_data[co * c_in * k + ci * k + ki];
+                                 * w_data[co * c_in_per_g * k + cig * k + ki];
                         }
                     }
                 }
@@ -54,7 +67,8 @@ pub fn conv1d_forward(
     tape.record(TapeEntry {
         op: BackwardOp::Conv1d, output_id: out,
         input_ids: smallvec![input, weight],
-        saved: SavedContext::TensorsAndShape(smallvec![input, weight], vec![stride, padding]),
+        saved: SavedContext::TensorsAndShape(smallvec![input, weight],
+            vec![stride, padding, groups]),
     });
     out
 }
@@ -62,9 +76,14 @@ pub fn conv1d_forward(
 #[cfg(feature = "cuda")]
 pub fn conv1d_forward(
     input: TensorId, weight: TensorId,
-    stride: usize, padding: usize,
+    stride: usize, padding: usize, groups: usize,
     store: &mut TensorStore, tape: &mut Tape,
 ) -> TensorId {
+    // CUDA path: kernel currently assumes groups=1. For now we
+    // disallow groups>1 here — Apple-only inference (which is the
+    // only consumer of grouped convs today) goes through the CPU
+    // branch above.
+    assert_eq!(groups, 1, "CUDA conv1d kernel does not yet support groups>1");
     let inp_shape = store.shape(input).to_vec();
     let w_shape = store.shape(weight).to_vec();
     let (n, c_in, l) = (inp_shape[0], inp_shape[1], inp_shape[2]);
@@ -85,7 +104,8 @@ pub fn conv1d_forward(
     tape.record(TapeEntry {
         op: BackwardOp::Conv1d, output_id: out,
         input_ids: smallvec![input, weight],
-        saved: SavedContext::TensorsAndShape(smallvec![input, weight], vec![stride, padding]),
+        saved: SavedContext::TensorsAndShape(smallvec![input, weight],
+            vec![stride, padding, groups]),
     });
     out
 }
@@ -171,19 +191,30 @@ pub fn conv1d_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorS
 }
 
 // =========================================================================
-// Conv2d: input [N,C_in,H,W], weight [C_out,C_in,kH,kW] -> [N,C_out,H_out,W_out]
+// Conv2d: input [N,C_in,H,W], weight [C_out,C_in/groups,kH,kW]
+//         -> [N,C_out,H_out,W_out]
+//
+// `groups` partitions C_in and C_out as in conv1d. groups=1 = dense
+// (regular conv2d), groups=C_in (with C_out=C_in) = depthwise. The
+// Cohere ConvSubsampling stack mixes pointwise (k=1, groups=1) with
+// depthwise-strided (k=3, s=2, groups=C_in) layers.
 // =========================================================================
 
 #[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn conv2d_forward(
     input: TensorId, weight: TensorId,
-    stride: usize, padding: usize,
+    stride: usize, padding: usize, groups: usize,
     store: &mut TensorStore, tape: &mut Tape,
 ) -> TensorId {
     let inp_shape = store.shape(input).to_vec();
     let w_shape = store.shape(weight).to_vec();
     let (n, c_in, h, w) = (inp_shape[0], inp_shape[1], inp_shape[2], inp_shape[3]);
-    let (c_out, _, kh, kw) = (w_shape[0], w_shape[1], w_shape[2], w_shape[3]);
+    let (c_out, c_in_per_g, kh, kw) = (w_shape[0], w_shape[1], w_shape[2], w_shape[3]);
+    assert!(groups >= 1, "groups must be >= 1");
+    assert_eq!(c_in_per_g * groups, c_in,
+        "groups={} must divide c_in={}", groups, c_in);
+    assert_eq!(c_out % groups, 0, "groups={} must divide c_out={}", groups, c_out);
+    let c_out_per_g = c_out / groups;
     let h_out = (h + 2 * padding - kh) / stride + 1;
     let w_out = (w + 2 * padding - kw) / stride + 1;
 
@@ -193,17 +224,19 @@ pub fn conv2d_forward(
 
     for ni in 0..n {
         for co in 0..c_out {
+            let g = co / c_out_per_g;
             for oh in 0..h_out {
                 for ow in 0..w_out {
                     let mut sum = 0.0f32;
-                    for ci in 0..c_in {
+                    for cig in 0..c_in_per_g {
+                        let ci = g * c_in_per_g + cig;
                         for ky in 0..kh {
                             for kx in 0..kw {
                                 let ih = (oh * stride) as isize - padding as isize + ky as isize;
                                 let iw = (ow * stride) as isize - padding as isize + kx as isize;
                                 if ih >= 0 && (ih as usize) < h && iw >= 0 && (iw as usize) < w {
                                     sum += inp_data[ni * c_in * h * w + ci * h * w + ih as usize * w + iw as usize]
-                                         * w_data[co * c_in * kh * kw + ci * kh * kw + ky * kw + kx];
+                                         * w_data[co * c_in_per_g * kh * kw + cig * kh * kw + ky * kw + kx];
                                 }
                             }
                         }
@@ -218,7 +251,8 @@ pub fn conv2d_forward(
     tape.record(TapeEntry {
         op: BackwardOp::Conv2d, output_id: out,
         input_ids: smallvec![input, weight],
-        saved: SavedContext::TensorsAndShape(smallvec![input, weight], vec![stride, padding]),
+        saved: SavedContext::TensorsAndShape(smallvec![input, weight],
+            vec![stride, padding, groups]),
     });
     out
 }
@@ -226,9 +260,10 @@ pub fn conv2d_forward(
 #[cfg(feature = "cuda")]
 pub fn conv2d_forward(
     input: TensorId, weight: TensorId,
-    stride: usize, padding: usize,
+    stride: usize, padding: usize, groups: usize,
     store: &mut TensorStore, tape: &mut Tape,
 ) -> TensorId {
+    assert_eq!(groups, 1, "CUDA conv2d kernel does not yet support groups>1");
     let inp_shape = store.shape(input).to_vec();
     let w_shape = store.shape(weight).to_vec();
     let (n, c_in, h, w) = (inp_shape[0], inp_shape[1], inp_shape[2], inp_shape[3]);
@@ -250,7 +285,8 @@ pub fn conv2d_forward(
     tape.record(TapeEntry {
         op: BackwardOp::Conv2d, output_id: out,
         input_ids: smallvec![input, weight],
-        saved: SavedContext::TensorsAndShape(smallvec![input, weight], vec![stride, padding]),
+        saved: SavedContext::TensorsAndShape(smallvec![input, weight],
+            vec![stride, padding, groups]),
     });
     out
 }

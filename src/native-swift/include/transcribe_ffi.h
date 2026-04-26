@@ -92,11 +92,33 @@ uint32_t ml_engine_repeat_interleave(uint32_t a, int32_t dim, uint32_t repeats);
 
 // 1-D convolution, PyTorch convention:
 //   input  [N, C_in,  L]
-//   weight [C_out, C_in, K]
+//   weight [C_out, C_in/groups, K]
 //   output [N, C_out, L_out] where L_out = (L + 2*padding - K) / stride + 1
-// No bias / no groups; apply bias via add() separately.
+// No bias — apply bias via add() separately. groups=1 is a dense
+// conv; groups=C_in (with C_out=C_in) is depthwise (used inside
+// Conformer's ConvModule).
 uint32_t ml_engine_conv1d(uint32_t input, uint32_t weight,
-                          uint64_t stride, uint64_t padding);
+                          uint64_t stride, uint64_t padding, uint64_t groups);
+
+// 2-D convolution, PyTorch convention.
+//   input  [N, C_in,  H, W]
+//   weight [C_out, C_in/groups, kH, kW]
+//   output [N, C_out, H_out, W_out]
+// Single (stride, padding) used for both spatial dims. No bias.
+uint32_t ml_engine_conv2d(uint32_t input, uint32_t weight,
+                          uint64_t stride, uint64_t padding, uint64_t groups);
+
+// 1-D batch normalization, inference mode:
+//   y = (x - running_mean) / sqrt(running_var + eps) * gamma + beta
+// x is [N, C, L]; running_mean / running_var / gamma / beta are [C].
+uint32_t ml_engine_batchnorm1d(uint32_t x, uint32_t running_mean,
+                               uint32_t running_var, uint32_t gamma,
+                               uint32_t beta, float eps);
+
+// Gated Linear Unit. Splits along `dim` (must have even size); returns
+// `first * sigmoid(second)`. `dim` may be negative (counts from end).
+// Output shape matches input with the `dim` size halved.
+uint32_t ml_engine_glu(uint32_t x, int32_t dim);
 
 // Embedding lookup. weight is [vocab_size, embed_dim]; indices is a
 // flat buffer of length (batch * seq_len). Output shape is
@@ -114,14 +136,25 @@ uint32_t ml_engine_rope(uint32_t x, uint64_t start_pos, float base);
 // ---------------------------------------------------------------------------
 // Audio preprocessing.
 //
-// Whisper-compatible log-mel spectrogram:
-//   sample_rate = 16000, n_fft = 400, hop_length = 160, n_mels = 80
+// Configurable log-mel spectrogram. Whisper defaults: sr=16000,
+// n_fft=400, hop=160, n_mels=80, normalize_mode=0. NeMo / Cohere
+// Transcribe: sr=16000, n_fft=512, hop=160, n_mels=128,
+// normalize_mode=1.
+//
+// normalize_mode:
+//   0 = Whisper: clamp [max-8, max], (x+4)/4. Bit-compatible with
+//       openai/whisper.
+//   1 = per-feature: subtract per-bin mean, divide by per-bin std.
+//       Matches NeMo's `normalize=per_feature`.
+//   2 = none: raw log10 with 1e-10 floor only.
+//
 // Output: TensorId of shape [n_mels, n_frames].
 // ---------------------------------------------------------------------------
 
 uint32_t ml_engine_log_mel_spectrogram(const float* samples, uint64_t samples_len,
                                        uint32_t sample_rate, uint64_t n_fft,
-                                       uint64_t hop_length, uint64_t n_mels);
+                                       uint64_t hop_length, uint64_t n_mels,
+                                       uint32_t normalize_mode);
 
 // ---------------------------------------------------------------------------
 // Tokenizer (HuggingFace tokenizer.json format).
