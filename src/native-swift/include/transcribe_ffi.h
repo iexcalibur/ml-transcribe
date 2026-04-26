@@ -161,12 +161,19 @@ uint32_t ml_engine_rel_shift(uint32_t x);
 // Output: TensorId of shape [n_mels, n_frames].
 // ---------------------------------------------------------------------------
 
+// `fb_tensor_id`: optional pre-loaded mel filterbank tensor of
+// shape `[n_mels, n_freqs]` where `n_freqs = n_fft/2 + 1`. Pass
+// `0xFFFFFFFF` (UINT32_MAX) to compute the filterbank internally
+// from the mel scale. Useful when the model ships its filterbank
+// as a buffer in safetensors and we want byte-for-byte parity
+// with the training-time DSP.
 uint32_t ml_engine_log_mel_spectrogram(const float* samples, uint64_t samples_len,
                                        uint32_t sample_rate, uint64_t n_fft,
                                        uint64_t hop_length, uint64_t n_mels,
                                        uint64_t n_window_size,
                                        float preemph,
-                                       uint32_t normalize_mode);
+                                       uint32_t normalize_mode,
+                                       uint32_t fb_tensor_id);
 
 // ---------------------------------------------------------------------------
 // Tokenizer (HuggingFace tokenizer.json format).

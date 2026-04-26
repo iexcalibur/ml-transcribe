@@ -111,6 +111,13 @@ public final class CohereTranscribe {
         // log-softmax, so it doesn't change which token wins).
         public let headWeight: Tensor               // [decDim, V]
         public let headBias: Tensor                 // [V]
+        // Optional pre-computed mel filterbank, baked into the
+        // safetensors as `preprocessor.featurizer.fb`. Shape after
+        // reshape: `[nMels, nFFT/2+1]` = `[128, 257]` for Cohere.
+        // Pass when you want the audio frontend to use the model's
+        // training-time filterbank verbatim, sidestepping any
+        // librosa / HTK / Slaney mel-scale debate.
+        public let preprocessorFb: Tensor?
 
         public init(
             encoderSubsampling: ConvSubsampling.Weights,
@@ -121,7 +128,8 @@ public final class CohereTranscribe {
             decoderLayers: [DecoderLayer.Weights],
             decoderFinalNormGamma: Tensor,
             decoderFinalNormBeta: Tensor,
-            headWeight: Tensor, headBias: Tensor
+            headWeight: Tensor, headBias: Tensor,
+            preprocessorFb: Tensor? = nil
         ) {
             self.encoderSubsampling = encoderSubsampling
             self.encoderLayers = encoderLayers
@@ -133,6 +141,7 @@ public final class CohereTranscribe {
             self.decoderFinalNormGamma = decoderFinalNormGamma
             self.decoderFinalNormBeta = decoderFinalNormBeta
             self.headWeight = headWeight; self.headBias = headBias
+            self.preprocessorFb = preprocessorFb
         }
     }
 
@@ -148,6 +157,19 @@ public final class CohereTranscribe {
     /// shape `[maxSeqLen, decoderHidden]`. We slice rows from this
     /// at each decoder step to add to the token embedding.
     private let decoderPosTable: Tensor
+
+    /// The model's training-time mel filterbank, reshaped to
+    /// `[nMels, nFFT/2+1]` if loaded from safetensors. Pass this to
+    /// `AudioPreprocessor.logMelSpectrogram(filterbankOverride:)` for
+    /// byte-for-byte parity with NeMo's preprocessing.
+    public var preprocessorFb: Tensor? {
+        guard let stored = weights.preprocessorFb else { return nil }
+        let shape = stored.shape
+        if shape.count == 3 && shape[0] == 1 {
+            return stored.reshape([shape[1], shape[2]])
+        }
+        return stored
+    }
 
     // -------------------------------------------------------------
     // Init
@@ -290,8 +312,24 @@ public final class CohereTranscribe {
     ) throws -> String {
         reset()
 
+        // Use the model's stored mel filterbank if available — gives
+        // byte-for-byte parity with NeMo's training-time DSP. The
+        // safetensors stores it as [1, nMels, nFreqs]; reshape to
+        // [nMels, nFreqs] for the FFI.
+        let fbOverride: Tensor?
+        if let storedFb = weights.preprocessorFb {
+            let shape = storedFb.shape
+            if shape.count == 3 && shape[0] == 1 {
+                fbOverride = storedFb.reshape([shape[1], shape[2]])
+            } else {
+                fbOverride = storedFb
+            }
+        } else {
+            fbOverride = nil
+        }
         let mel = AudioPreprocessor.logMelSpectrogram(
-            samples: samples, config: .cohereTranscribe
+            samples: samples, config: .cohereTranscribe,
+            filterbankOverride: fbOverride
         )
         let nMels = mel.shape[0]
         let nFrames = mel.shape[1]

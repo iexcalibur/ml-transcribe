@@ -149,6 +149,11 @@ public enum CohereTranscribeWeightMap {
         }
 
         // ----- Top-level pieces -----
+        // The model bundles its training-time mel filterbank (and a
+        // Hann window, which we don't currently use). Pull it if
+        // present; missing is OK — falls back to our internally-
+        // computed Slaney-mel filterbank.
+        let preprocessorFb = src["preprocessor.featurizer.fb"]
         let bundle = CohereTranscribe.Weights(
             encoderSubsampling: subWeights,
             encoderLayers: encLayerWeights,
@@ -161,7 +166,8 @@ public enum CohereTranscribeWeightMap {
             decoderFinalNormGamma: try fetch(src, "transf_decoder._decoder.final_layer_norm.weight"),
             decoderFinalNormBeta:  try fetch(src, "transf_decoder._decoder.final_layer_norm.bias"),
             headWeight: try fetch(src, "log_softmax.mlp.layer0.weight"),
-            headBias:   try fetch(src, "log_softmax.mlp.layer0.bias")
+            headBias:   try fetch(src, "log_softmax.mlp.layer0.bias"),
+            preprocessorFb: preprocessorFb
         )
         return bundle
     }

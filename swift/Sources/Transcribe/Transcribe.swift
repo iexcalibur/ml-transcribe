@@ -65,7 +65,10 @@ public enum TensorError: Error {
 public final class Tensor {
     /// Rust-side `TensorId` (a `u32`). `UInt32.max` is reserved as an
     /// error sentinel — we never construct a `Tensor` holding it.
-    fileprivate let id: UInt32
+    /// `internal` rather than `fileprivate` so other files in the
+    /// `Transcribe` module (e.g. `AudioPreprocessor`) can pass the
+    /// id to FFI calls that need a tensor handle.
+    internal let id: UInt32
 
     /// If non-nil, this Tensor is a *borrowed view* of a tensor owned
     /// by `owner` (e.g. a `SafetensorsWeights`). Deinit does NOT call

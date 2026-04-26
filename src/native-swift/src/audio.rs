@@ -166,6 +166,14 @@ pub enum NormalizeMode {
 /// `preemph` applies a first-order pre-emphasis filter to the audio
 /// BEFORE windowing: `y[i] = x[i] - preemph * x[i-1]`. NeMo /
 /// Cohere Transcribe use `0.97`. Pass `0.0` to skip.
+///
+/// `fb_override` lets the caller supply the mel filterbank verbatim,
+/// in row-major `[n_mels, n_freqs]` order (where `n_freqs = n_fft/2+1`).
+/// This bypasses the internal `mel_filterbank` computation, which is
+/// useful when the model ships its filterbank as a buffer in the
+/// safetensors file (e.g. Cohere Transcribe's
+/// `preprocessor.featurizer.fb`) and wants byte-for-byte parity. Pass
+/// `None` to compute the filterbank internally.
 pub fn log_mel_spectrogram(
     samples: &[f32],
     sample_rate: u32,
@@ -175,6 +183,7 @@ pub fn log_mel_spectrogram(
     n_window_size: usize,
     preemph: f32,
     mode: NormalizeMode,
+    fb_override: Option<&[f32]>,
 ) -> (Vec<f32>, Vec<usize>) {
     let n_window_size = if n_window_size == 0 { n_fft } else { n_window_size };
     assert!(n_window_size <= n_fft,
@@ -244,12 +253,23 @@ pub fn log_mel_spectrogram(
     }
 
     // 4. Apply mel filterbank. mel[m, f] = sum_k power[f, k] * fb[m, k].
+    // If the caller passes a `fb_override`, use it verbatim;
+    // otherwise compute one to match the model's expected mel scale.
     // PerFeature mode mirrors NeMo / Cohere — Slaney mel scale.
     // Whisper / None modes use HTK to stay bit-compatible with
     // openai/whisper.
     let mel_scale_htk = !matches!(mode, NormalizeMode::PerFeature);
-    let fb = mel_filterbank(sample_rate, n_fft, n_mels, 0.0,
-                            sample_rate as f32 / 2.0, mel_scale_htk);
+    let fb_owned: Vec<f32>;
+    let fb: &[f32] = if let Some(provided) = fb_override {
+        assert_eq!(provided.len(), n_mels * n_freqs,
+            "fb_override len {} must equal n_mels*n_freqs = {}*{} = {}",
+            provided.len(), n_mels, n_freqs, n_mels * n_freqs);
+        provided
+    } else {
+        fb_owned = mel_filterbank(sample_rate, n_fft, n_mels, 0.0,
+                                  sample_rate as f32 / 2.0, mel_scale_htk);
+        &fb_owned
+    };
     let mut mel = vec![0.0f32; n_mels * n_frames];
     for m in 0..n_mels {
         for f in 0..n_frames {
@@ -335,7 +355,7 @@ mod tests {
         let samples = vec![1.0f32; 16000]; // 1 second of DC at 16 kHz
         let (mel, shape) = log_mel_spectrogram(
             &samples, 16000, 400, 160, 80, /*n_window_size=*/ 0,
-            /*preemph=*/ 0.0, NormalizeMode::Whisper);
+            /*preemph=*/ 0.0, NormalizeMode::Whisper, None);
         assert_eq!(shape, vec![80, 101]);
         for &x in mel.iter() {
             assert!(x.is_finite(), "non-finite value in mel: {}", x);
@@ -355,7 +375,7 @@ mod tests {
             .collect();
         let (mel, shape) = log_mel_spectrogram(
             &samples, sr, 400, 160, 80, /*n_window_size=*/ 0,
-            /*preemph=*/ 0.0, NormalizeMode::Whisper);
+            /*preemph=*/ 0.0, NormalizeMode::Whisper, None);
         assert_eq!(shape, vec![80, 101]);
 
         // Average energy per mel bin (across frames). Find the argmax.
@@ -393,7 +413,7 @@ mod tests {
             .collect();
         let (mel, shape) = log_mel_spectrogram(
             &samples, sr, 400, 160, 80, /*n_window_size=*/ 0,
-            /*preemph=*/ 0.0, NormalizeMode::PerFeature);
+            /*preemph=*/ 0.0, NormalizeMode::PerFeature, None);
         let n_mels = shape[0];
         let n_frames = shape[1];
         for m in 0..n_mels {

@@ -1022,6 +1022,7 @@ pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
     n_window_size: u64,
     preemph: f32,
     normalize_mode: u32,
+    fb_tensor_id: u32,
 ) -> u32 {
     if samples_ptr.is_null() || samples_len == 0 {
         return INVALID_ID;
@@ -1033,6 +1034,16 @@ pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
         2 => audio::NormalizeMode::None,
         _ => audio::NormalizeMode::Whisper,
     };
+    let mut eng = engine().lock().unwrap();
+    // Pre-load the filterbank as F32 if the caller passed one. We
+    // need to materialize a Vec<f32> here (rather than a borrow into
+    // the store) because audio::log_mel_spectrogram takes the slice
+    // by-reference and our engine's `to_host` returns owned data.
+    let fb_data: Option<Vec<f32>> = if fb_tensor_id != INVALID_ID {
+        Some(eng.store.to_host(fb_tensor_id as TensorId))
+    } else {
+        None
+    };
     let (data, shape) = audio::log_mel_spectrogram(
         samples,
         sample_rate,
@@ -1042,8 +1053,8 @@ pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
         n_window_size as usize,
         preemph,
         mode,
+        fb_data.as_deref(),
     );
-    let mut eng = engine().lock().unwrap();
     eng.store.from_slice(&data, &shape) as u32
 }
 

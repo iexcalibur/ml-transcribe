@@ -384,12 +384,18 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
                 "set COHERE_RUN_E2E=1 to run; expect minutes on CPU"
             )
         }
-        // Pick an audio sample — prefer the bundled voxpopuli demo.
+        // Pick an audio sample. `COHERE_AUDIO_SAMPLE` env var lets you
+        // override; otherwise prefer the canonical voxpopuli demo,
+        // then a tts_sample.wav (clean slow speech for sanity), then
+        // any sample.wav at the directory root.
         let dirPath = ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+        let envSample = ProcessInfo.processInfo.environment["COHERE_AUDIO_SAMPLE"]
         let candidates = [
+            envSample,
             (dirPath as NSString).appendingPathComponent("demo/voxpopuli_test_en_demo.wav"),
+            (dirPath as NSString).appendingPathComponent("tts_sample.wav"),
             (dirPath as NSString).appendingPathComponent("sample.wav"),
-        ]
+        ].compactMap { $0 }
         var samplePath: String?
         for p in candidates where FileManager.default.fileExists(atPath: p) {
             samplePath = p; break
@@ -458,7 +464,8 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
         say("running mel + encoder + cross-attn prefill...")
         model.reset()
         let mel = AudioPreprocessor.logMelSpectrogram(
-            samples: padded, config: .cohereTranscribe
+            samples: padded, config: .cohereTranscribe,
+            filterbankOverride: model.preprocessorFb
         )
         let melBatched = mel.reshape([1, mel.shape[0], mel.shape[1]])
         let t0 = Date()

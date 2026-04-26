@@ -89,10 +89,21 @@ public enum AudioPreprocessor {
     /// Compute a log-mel spectrogram from `samples`.
     ///
     /// Output shape: `[nMels, nFrames]`.
+    ///
+    /// `filterbankOverride` lets you pass a pre-loaded mel
+    /// filterbank tensor of shape `[nMels, nFFT/2+1]` instead of
+    /// having the FFI compute one from the mel scale. Useful when
+    /// the model ships its filterbank as a buffer in safetensors
+    /// (e.g. Cohere Transcribe's `preprocessor.featurizer.fb`).
+    /// The override takes ownership semantics: pass the same
+    /// `Tensor` between calls, since the FFI just reads its
+    /// underlying TensorId.
     public static func logMelSpectrogram(
         samples: [Float],
-        config: Config = .whisper
+        config: Config = .whisper,
+        filterbankOverride: Tensor? = nil
     ) -> Tensor {
+        let fbId: UInt32 = filterbankOverride?.id ?? UInt32.max
         let id: UInt32 = samples.withUnsafeBufferPointer { buf in
             ml_engine_log_mel_spectrogram(
                 buf.baseAddress,
@@ -103,7 +114,8 @@ public enum AudioPreprocessor {
                 UInt64(config.nMels),
                 UInt64(config.nWindowSize),
                 config.preemph,
-                config.normalize.rawValue
+                config.normalize.rawValue,
+                fbId
             )
         }
         precondition(id != UInt32.max,
