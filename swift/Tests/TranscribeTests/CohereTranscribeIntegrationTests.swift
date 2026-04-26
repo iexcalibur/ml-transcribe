@@ -200,6 +200,121 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
         say("ok — ConvSubsampling produced finite output")
     }
 
+    /// Compare Cohere's stored mel filterbank values against the
+    /// HTK-Slaney filterbank we compute internally. If these differ
+    /// meaningfully (e.g. >1e-3 RMSE in the row sums), our DSP is
+    /// emitting features the model wasn't trained on.
+    func testCohereStoredFilterbankSanityCheck() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let weights = try SafetensorsWeights(path: dir.safetensors, keepF16: true)
+        guard let fb = weights["preprocessor.featurizer.fb"] else {
+            throw XCTSkip("no preprocessor.featurizer.fb in safetensors")
+        }
+        let stderr = FileHandle.standardError
+        stderr.write(("fb shape: \(fb.shape)\n").data(using: .utf8)!)
+        let fbData = fb.toArray()
+        let nMels = fb.shape[1]
+        let nFreqs = fb.shape[2]
+        // Print row sums (should be ~1 for area-normalized Slaney
+        // filterbank, or ~triangular peak for HTK).
+        stderr.write("  row sums (first 10):\n".data(using: .utf8)!)
+        for m in 0..<10 {
+            let off = m * nFreqs
+            var sum: Float = 0
+            for k in 0..<nFreqs {
+                sum += fbData[off + k]
+            }
+            stderr.write("    row \(m): sum=\(sum)\n".data(using: .utf8)!)
+        }
+        // Print row 5's nonzero columns
+        stderr.write("  row 5 nonzero columns:\n".data(using: .utf8)!)
+        let row5Off = 5 * nFreqs
+        for k in 0..<nFreqs {
+            let v = fbData[row5Off + k]
+            if v != 0 {
+                stderr.write("    col \(k): \(v)\n".data(using: .utf8)!)
+            }
+        }
+        _ = nMels
+    }
+
+    /// Decode each generated token id individually to see what
+    /// SentencePiece thinks it is. Useful when the integrated decode
+    /// (`skipSpecialTokens=true`) is hiding what's actually being
+    /// produced.
+    func testCohereDecodeIndividualTokens() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+        let stderr = FileHandle.standardError
+        // From the latest E2E run: prompt + first 14 generated tokens.
+        let allIds: [UInt32] = [
+            7, 4, 16, 62, 62, 5, 9, 11, 13,             // prompt
+            5, 13785, 1617, 752, 832, 832, 752, 752,    // generated
+            752, 13785, 752, 1899, 1899, 651,
+        ]
+        for id in allIds {
+            let decoded = try tokenizer.decode([id], skipSpecialTokens: false)
+            stderr.write("  \(id) → \(decoded.debugDescription)\n".data(using: .utf8)!)
+        }
+    }
+
+    /// Bisect helper: feed silence vs real speech through the same
+    /// model and print the tokens each produces. If the outputs
+    /// differ, the encoder is reading audio (good); if identical,
+    /// the encoder is being ignored (bad).
+    func testCohereEncoderDifferentiatesSilenceFromSpeech() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+
+        let stderr = FileHandle.standardError
+        func say(_ s: String) {
+            stderr.write(("[bisect] " + s + "\n").data(using: .utf8)!)
+        }
+        let config = CohereTranscribe.Config(bosTokenId: 4, eosTokenId: 3, padTokenId: 2)
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let model = CohereTranscribe(config: config, weights: weights)
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+        let prompt = [7, 4, 16, 62, 62, 5, 9, 11, 13]
+
+        func decode(samples: [Float], label: String) throws {
+            model.reset()
+            let mel = AudioPreprocessor.logMelSpectrogram(
+                samples: samples, config: .cohereTranscribe
+            )
+            let melB = mel.reshape([1, mel.shape[0], mel.shape[1]])
+            model.setEncoderContext(mel: melB)
+            var nextTok = -1
+            for tok in prompt {
+                nextTok = try model.decoderStep(tokenId: tok)
+            }
+            var tokens: [Int] = []
+            for _ in 0..<10 {
+                if nextTok == config.eosTokenId { break }
+                tokens.append(nextTok)
+                nextTok = try model.decoderStep(tokenId: nextTok)
+            }
+            let text = try tokenizer.decode(
+                tokens.map { UInt32($0) }, skipSpecialTokens: true
+            )
+            say("\(label) -> tokens=\(tokens), text=\(text.debugDescription)")
+        }
+
+        say("decoding silence...")
+        try decode(samples: [Float](repeating: 0, count: 5 * 16_000), label: "silence")
+        say("decoding voxpopuli sample...")
+        let wavPath = (ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+            as NSString).appendingPathComponent("demo/voxpopuli_test_en_demo.wav")
+        let speech = try Self.loadWav16kMono(wavPath)
+        try decode(samples: speech, label: "voxpopuli")
+    }
+
     /// Step 3.5: encoder-only forward on 5 seconds of silence.
     /// Lighter than full E2E so we can see whether the Conformer
     /// encoder runs end-to-end on real weights without crashing,
@@ -293,11 +408,19 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
             eosTokenId: 3,
             padTokenId: 2
         )
+        // Try F32 (keepF16=false). BF16 → F32 conversion increases
+        // memory ~2x but eliminates F16 precision questions. The
+        // peak memory is ~14 GiB; needs ~13 GiB free to succeed.
+        let useF16 = ProcessInfo.processInfo.environment["COHERE_USE_F16"] != "0"
         let weights = try CohereTranscribeWeightMap.load(
-            from: dir.safetensors, config: config, keepF16: true
+            from: dir.safetensors, config: config, keepF16: useF16
         )
         let model = CohereTranscribe(config: config, weights: weights)
         let tokenizer = try Tokenizer(path: dir.tokenizer)
+        let prec = useF16 ? "F16" : "F32"
+        FileHandle.standardError.write(
+            ("[step] precision: " + prec + "\n").data(using: .utf8)!
+        )
 
         // Read 16 kHz mono PCM16 WAV (same helper as Whisper test).
         let samples = try Self.loadWav16kMono(wavPath)
