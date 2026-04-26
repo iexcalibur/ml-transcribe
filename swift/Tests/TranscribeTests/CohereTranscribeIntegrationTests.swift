@@ -122,36 +122,23 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
         print("[cohere-transcribe] '\(sample)' -> ids=\(ids) -> '\(decoded)'")
     }
 
-    /// Step 3 (placeholder): full end-to-end transcription. Skipped
-    /// unless both `COHERE_TRANSCRIBE_DIR` and `COHERE_RUN_E2E=1` are
-    /// set. The body builds the real `CohereTranscribe.Weights` from
-    /// the safetensors via a Cohere-specific WeightMap helper —
-    /// implemented once we've inspected the actual tensor names.
-    func testCohereTranscribeOnRealAudio() throws {
-        _ = try cohereDir()
-        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
-        else {
-            throw XCTSkip(
-                "set COHERE_RUN_E2E=1 along with COHERE_TRANSCRIBE_DIR " +
-                "once the WeightMap helper for Cohere is finalized"
-            )
-        }
-        // TODO: once inspect-model run on the downloaded safetensors
-        // has revealed the exact tensor name layout, fill in the
-        // Cohere-specific WeightMap and instantiate the model:
-        //
-        //     let weights = try CohereTranscribeWeightMap.load(
-        //         from: dir.safetensors, config: .cohereTranscribe2B
-        //     )
-        //     let model = CohereTranscribe(weights: weights)
-        //     let tokenizer = try Tokenizer(path: dir.tokenizer)
-        //     let samples = try Self.loadWav16kMono(samplePath)
-        //     let text = try model.transcribe(
-        //         samples: samples, tokenizer: tokenizer,
-        //         promptTokens: [config.bosTokenId, /* lang/task tokens */]
-        //     )
-        //     print("[cohere-transcribe] -> \(text)")
-        //     XCTAssertFalse(text.isEmpty)
-        XCTFail("TODO: implement once the WeightMap is finalized")
+    /// Step 3: build the real `CohereTranscribe.Weights` bundle from
+    /// the downloaded safetensors and verify the model constructs
+    /// without weight-shape errors. This exercises the entire
+    /// `CohereTranscribeWeightMap.load` path — every name lookup,
+    /// every `[out,in]→[in,out]` transpose, and every
+    /// `CohereTranscribe.Weights` shape constraint that the
+    /// constructor checks.
+    func testCohereModelLoadsFromRealWeights() throws {
+        let dir = try cohereDir()
+        let config = CohereTranscribe.Config.cohereTranscribe2B
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let model = CohereTranscribe(config: config, weights: weights)
+        XCTAssertEqual(model.config.encoder.nLayers, 48)
+        XCTAssertEqual(model.config.decoderLayers, 8)
+        XCTAssertEqual(model.config.vocabSize, 16384)
+        print("[cohere-transcribe] model constructed successfully")
     }
 }
