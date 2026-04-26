@@ -141,4 +141,261 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
         XCTAssertEqual(model.config.vocabSize, 16384)
         print("[cohere-transcribe] model constructed successfully")
     }
+
+    /// Step 3.4: ConvSubsampling-only forward — the audio frontend
+    /// alone, before any Conformer layer runs. If this fails the bug
+    /// is in the conv2d/Linear chain; if it passes the bug is in the
+    /// Conformer block.
+    func testCohereConvSubsamplingOnly() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+        func say(_ s: String) {
+            stderr.write(("[step] " + s + "\n").data(using: .utf8)!)
+        }
+        say("load weights...")
+        let raw = try SafetensorsWeights(path: dir.safetensors, keepF16: true)
+        let mapped = WeightMap(
+            source: raw,
+            transpose: CohereTranscribeWeightMap.cohereTransposeSet(
+                encoderLayers: 48, decoderLayers: 8
+            )
+        )
+        say("loaded; building ConvSubsampling weights...")
+        let subWeights = try ConvSubsampling.Weights(
+            conv1Weight: mapped["encoder.pre_encode.conv.0.weight"]!,
+            conv1Bias:   mapped["encoder.pre_encode.conv.0.bias"]!,
+            conv2Weight: mapped["encoder.pre_encode.conv.2.weight"]!,
+            conv2Bias:   mapped["encoder.pre_encode.conv.2.bias"]!,
+            conv3Weight: mapped["encoder.pre_encode.conv.3.weight"]!,
+            conv3Bias:   mapped["encoder.pre_encode.conv.3.bias"]!,
+            conv4Weight: mapped["encoder.pre_encode.conv.5.weight"]!,
+            conv4Bias:   mapped["encoder.pre_encode.conv.5.bias"]!,
+            conv5Weight: mapped["encoder.pre_encode.conv.6.weight"]!,
+            conv5Bias:   mapped["encoder.pre_encode.conv.6.bias"]!,
+            outProjWeight: mapped["encoder.pre_encode.out.weight"]!,
+            outProjBias:   mapped["encoder.pre_encode.out.bias"]!
+        )
+        say("constructing ConvSubsampling...")
+        let sub = ConvSubsampling(
+            config: ConformerEncoder.Config.cohereTranscribe2B,
+            weights: subWeights
+        )
+        // 5 sec @ 16 kHz, mel → [128, 501].
+        let samples = [Float](repeating: 0, count: 5 * 16_000)
+        say("computing mel...")
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: samples, config: .cohereTranscribe
+        )
+        say("  mel shape: \(mel.shape)")
+        let melBatched = mel.reshape([1, mel.shape[0], mel.shape[1]])
+        say("running ConvSubsampling.forward...")
+        let t = Date()
+        let out = sub.forward(mel: melBatched)
+        say("  conv out shape: \(out.shape)  (\(String(format: "%.1f", Date().timeIntervalSince(t)))s)")
+        for v in out.toArray().prefix(50) {
+            XCTAssertTrue(v.isFinite, "non-finite ConvSubsampling output: \(v)")
+        }
+        say("ok — ConvSubsampling produced finite output")
+    }
+
+    /// Step 3.5: encoder-only forward on 5 seconds of silence.
+    /// Lighter than full E2E so we can see whether the Conformer
+    /// encoder runs end-to-end on real weights without crashing,
+    /// before paying for the decoder loop.
+    func testCohereEncoderOnlyForward() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else {
+            throw XCTSkip("set COHERE_RUN_E2E=1 to run; encoder forward is slow on CPU")
+        }
+        let stderr = FileHandle.standardError
+        func say(_ s: String) {
+            // Unbuffered write so we see progress even mid-test if
+            // a panic kills the process.
+            stderr.write(("[step] " + s + "\n").data(using: .utf8)!)
+        }
+        say("loading weights...")
+        let t0 = Date()
+        let config = CohereTranscribe.Config.cohereTranscribe2B
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        say("loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
+
+        say("constructing model...")
+        let t1 = Date()
+        let model = CohereTranscribe(config: config, weights: weights)
+        say("constructed in \(String(format: "%.1f", Date().timeIntervalSince(t1)))s")
+
+        // 5 sec of silence → ~500 frames before subsampling, ~62 after.
+        let samples = [Float](repeating: 0, count: 5 * 16_000)
+        say("running mel + encoder forward...")
+        let t2 = Date()
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: samples, config: .cohereTranscribe
+        )
+        say("  mel shape: \(mel.shape)")
+        let melBatched = mel.reshape([1, mel.shape[0], mel.shape[1]])
+        let encOut = model.runEncoder(mel: melBatched)
+        say("  encoder out shape: \(encOut.shape)")
+        say("encoder forward took \(String(format: "%.1f", Date().timeIntervalSince(t2)))s")
+
+        XCTAssertEqual(encOut.shape[0], 1)
+        XCTAssertEqual(encOut.shape[2], config.encDecProjToDim)
+        for v in encOut.toArray().prefix(100) {
+            XCTAssertTrue(v.isFinite, "non-finite encoder output: \(v)")
+        }
+        say("ok — encoder produced finite output")
+    }
+
+    /// Step 4: actual end-to-end transcription. Skipped unless
+    /// `COHERE_RUN_E2E=1` is also set (the full encoder forward over
+    /// 48 Conformer layers at d_model=1280 takes minutes on CPU).
+    ///
+    /// Uses the bundled `demo/voxpopuli_test_en_demo.wav` if it
+    /// exists, else falls back to `sample.wav` next to the
+    /// safetensors (any 16 kHz mono PCM16 file works).
+    ///
+    /// Per the model card: `decoder_start_token_id = 13764` is the
+    /// canonical start-of-prompt token for this checkpoint. We prime
+    /// the decoder with just that token and let it generate.
+    func testCohereTranscribeEndToEnd() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else {
+            throw XCTSkip(
+                "set COHERE_RUN_E2E=1 to run; expect minutes on CPU"
+            )
+        }
+        // Pick an audio sample — prefer the bundled voxpopuli demo.
+        let dirPath = ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+        let candidates = [
+            (dirPath as NSString).appendingPathComponent("demo/voxpopuli_test_en_demo.wav"),
+            (dirPath as NSString).appendingPathComponent("sample.wav"),
+        ]
+        var samplePath: String?
+        for p in candidates where FileManager.default.fileExists(atPath: p) {
+            samplePath = p; break
+        }
+        guard let wavPath = samplePath else {
+            throw XCTSkip(
+                "no audio sample found at \(candidates.joined(separator: ", "))"
+            )
+        }
+
+        // Build model from real weights.
+        let config = CohereTranscribe.Config(
+            // Override BOS/EOS/PAD with values from generation_config.json.
+            // (Defaults in CohereTranscribe.Config use placeholder 0s.)
+            bosTokenId: 4,
+            eosTokenId: 3,
+            padTokenId: 2
+        )
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let model = CohereTranscribe(config: config, weights: weights)
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+
+        // Read 16 kHz mono PCM16 WAV (same helper as Whisper test).
+        let samples = try Self.loadWav16kMono(wavPath)
+        // Pad to max_audio_clip_s only if audio is shorter — but
+        // also cap at 30 sec to keep encoder forward time bounded.
+        // 5 sec of audio is enough to see whether transcription works.
+        let cap = min(samples.count, 30 * 16_000)
+        let padded = Array(samples.prefix(cap))
+
+        // Decoder priming: just the canonical decoder_start_token_id.
+        // We picked 13764 from generation_config.json; if that's
+        // insufficient for the model to know it should be transcribing
+        // English, the output will be visibly off and we'll iterate.
+        let stderr = FileHandle.standardError
+        func say(_ s: String) {
+            stderr.write(("[step] " + s + "\n").data(using: .utf8)!)
+        }
+        say("audio: \(padded.count / 16_000) sec, \(padded.count) samples")
+
+        say("running mel + encoder + cross-attn prefill...")
+        model.reset()
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: padded, config: .cohereTranscribe
+        )
+        let melBatched = mel.reshape([1, mel.shape[0], mel.shape[1]])
+        let t0 = Date()
+        model.setEncoderContext(mel: melBatched)
+        say("  encoder + prefill done in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
+
+        say("greedy decode (max 30 tokens)...")
+        let t1 = Date()
+        let promptTokens = [13764]
+        var tokens: [Int] = []
+        var nextTok = -1
+        for tok in promptTokens {
+            nextTok = try model.decoderStep(tokenId: tok)
+        }
+        for i in 0..<30 {
+            if nextTok == config.eosTokenId {
+                say("  eos at step \(i)")
+                break
+            }
+            tokens.append(nextTok)
+            say("  step \(i) → token \(nextTok)")
+            nextTok = try model.decoderStep(tokenId: nextTok)
+        }
+        say("decode done in \(String(format: "%.1f", Date().timeIntervalSince(t1)))s")
+
+        let text = try tokenizer.decode(
+            tokens.map { UInt32($0) },
+            skipSpecialTokens: true
+        )
+        print("[cohere-transcribe] '\(wavPath)' -> \"\(text)\"")
+        XCTAssertGreaterThan(tokens.count, 0,
+            "expected non-empty transcription, got '\(text)'")
+    }
+
+    // MARK: - WAV reader (same as WhisperTinyIntegrationTests)
+
+    private static func loadWav16kMono(_ path: String) throws -> [Float] {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        guard data.count >= 44 else {
+            throw NSError(domain: "wav", code: 1)
+        }
+        let format = data.subdata(in: 20..<22).withUnsafeBytes { $0.load(as: UInt16.self) }
+        let channels = data.subdata(in: 22..<24).withUnsafeBytes { $0.load(as: UInt16.self) }
+        let rate = data.subdata(in: 24..<28).withUnsafeBytes { $0.load(as: UInt32.self) }
+        let bps = data.subdata(in: 34..<36).withUnsafeBytes { $0.load(as: UInt16.self) }
+        guard format == 1, channels == 1, rate == 16000, bps == 16 else {
+            throw NSError(domain: "wav", code: 2, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "expected PCM16 mono 16 kHz, got format=\(format) ch=\(channels) sr=\(rate) bps=\(bps)"
+            ])
+        }
+        var offset = 12
+        var dataStart = -1
+        var dataLen = 0
+        while offset + 8 <= data.count {
+            let id = String(data: data.subdata(in: offset..<(offset + 4)),
+                            encoding: .ascii) ?? ""
+            let size = Int(data.subdata(in: (offset + 4)..<(offset + 8))
+                .withUnsafeBytes { $0.load(as: UInt32.self) })
+            if id == "data" { dataStart = offset + 8; dataLen = size; break }
+            offset += 8 + size
+        }
+        guard dataStart >= 0 else {
+            throw NSError(domain: "wav", code: 3)
+        }
+        let nSamples = dataLen / 2
+        var floats = [Float](repeating: 0, count: nSamples)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let i16 = raw.baseAddress!
+                .advanced(by: dataStart)
+                .assumingMemoryBound(to: Int16.self)
+            for i in 0..<nSamples {
+                floats[i] = Float(i16[i]) / 32768.0
+            }
+        }
+        return floats
+    }
 }

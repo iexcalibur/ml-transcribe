@@ -475,9 +475,37 @@ impl TensorStore {
         if self.get(id).is_contiguous() {
             return id;
         }
-        let data = self.make_contiguous_data(id);
+        // Preserve the storage dtype across the materialization step.
+        // Without this, an F16 tensor's contiguous copy gets stored
+        // as F32 — doubling memory and breaking the WeightMap
+        // transpose-cache memory savings.
         let shape = self.get(id).shape.clone();
-        self.from_vec(data, &shape)
+        match self.get(id).dtype {
+            Dtype::F32 => {
+                let data = self.make_contiguous_data(id);
+                self.from_vec(data, &shape)
+            }
+            Dtype::F16 => {
+                // Gather F16 -> F16 (no F32 round-trip) so storage
+                // stays compact.
+                let t = self.get(id);
+                let size = t.size;
+                let ndim = t.shape.len();
+                let out_strides = compute_strides(&t.shape);
+                let mut data_f16 = vec![half::f16::ZERO; size];
+                for i in 0..size {
+                    let mut src_idx = 0usize;
+                    let mut rem = i;
+                    for d in 0..ndim {
+                        let coord = rem / out_strides[d];
+                        rem %= out_strides[d];
+                        src_idx += coord * t.strides[d];
+                    }
+                    data_f16[i] = t.data_f16[src_idx];
+                }
+                self.from_vec_f16(data_f16, &shape)
+            }
+        }
     }
 
     pub fn clear_alloc_cache(&mut self) {

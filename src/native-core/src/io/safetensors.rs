@@ -124,11 +124,16 @@ pub fn load_into(
     load_into_with_dtype(path, store, /*keep_f16=*/ false)
 }
 
-/// Like `load_into`, but if `keep_f16` is true, F16 source tensors are
-/// stored as F16 in the engine (saving half the memory) instead of
-/// being up-converted to F32 on entry. F32 and BF16 source dtypes
-/// always produce F32 storage — F16 is the only dtype where the
-/// preserve flag has any effect.
+/// Like `load_into`, but if `keep_f16` is true, F16 AND BF16 source
+/// tensors are stored as F16 in the engine (saving half the memory)
+/// instead of being up-converted to F32 on entry. F32 source dtypes
+/// always produce F32 storage.
+///
+/// Cohere Transcribe-2B specifically: its 4.13 GiB checkpoint is
+/// almost entirely BF16. With `keep_f16=true` the in-memory footprint
+/// is ~4 GiB instead of the ~8 GiB you'd get with the F32 path —
+/// crucial when the WeightMap then materializes transposed copies for
+/// every PyTorch Linear weight on top.
 pub fn load_into_with_dtype(
     path: &Path,
     store: &mut TensorStore,
@@ -156,6 +161,26 @@ pub fn load_into_with_dtype(
             let data_f16: Vec<f16> = raw
                 .chunks_exact(2)
                 .map(|c| f16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            store.from_vec_f16(data_f16, &shape)
+        } else if keep_f16 && view.dtype() == Dtype::BF16 {
+            // BF16 → F16 via F32 element-by-element. We never
+            // materialize a full F32 buffer, so peak memory stays
+            // at the 2-bytes-per-element BF16 input plus the
+            // 2-bytes-per-element F16 output.
+            let raw = view.data();
+            if raw.len() != numel * 2 {
+                return Err(SafetensorsError::ShapeDataMismatch {
+                    expected_bytes: numel * 2,
+                    actual_bytes: raw.len(),
+                });
+            }
+            let data_f16: Vec<f16> = raw
+                .chunks_exact(2)
+                .map(|c| {
+                    let bf = bf16::from_le_bytes([c[0], c[1]]);
+                    f16::from_f32(bf.to_f32())
+                })
                 .collect();
             store.from_vec_f16(data_f16, &shape)
         } else {

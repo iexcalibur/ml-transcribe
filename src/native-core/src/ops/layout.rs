@@ -1,4 +1,5 @@
 use smallvec::smallvec;
+use half::f16;
 use crate::autograd::{BackwardOp, SavedContext, Tape, TapeEntry};
 use crate::tensor::{TensorId, TensorStore, compute_strides};
 
@@ -111,6 +112,8 @@ pub fn view_backward(grad: TensorId, saved: &SavedContext, store: &mut TensorSto
 /// CPU permute: share data buffer, just rearrange strides (creates non-contiguous view).
 #[cfg(any(feature = "cpu", feature = "webgpu"))]
 pub fn permute(a: TensorId, dims: &[usize], store: &mut TensorStore, tape: &mut Tape) -> TensorId {
+    use crate::tensor::Dtype;
+
     let a_shape = store.shape(a).to_vec();
     let a_strides = store.get(a).strides.clone();
     let ndim = a_shape.len();
@@ -122,9 +125,21 @@ pub fn permute(a: TensorId, dims: &[usize], store: &mut TensorStore, tape: &mut 
         new_strides[i] = a_strides[dims[i]];
     }
 
-    let data = store.get(a).data.clone();
     let size = store.size(a);
-    let out = store.insert_raw(data, new_shape, new_strides, size);
+    let out = match store.dtype(a) {
+        Dtype::F16 => {
+            // Carry F16 storage over to the new view; if we cloned
+            // `.data` (the F32 buffer) the result would be an empty
+            // F32 tensor and any later `to_host`/`contiguous` would
+            // index into a 0-length vec.
+            let data_f16 = store.get(a).data_f16.clone();
+            store.insert_raw_f16(data_f16, new_shape, new_strides, size)
+        }
+        Dtype::F32 => {
+            let data = store.get(a).data.clone();
+            store.insert_raw(data, new_shape, new_strides, size)
+        }
+    };
 
     tape.record(TapeEntry {
         op: BackwardOp::Permute, output_id: out, input_ids: smallvec![a],
@@ -242,6 +257,31 @@ impl TensorStore {
             data, shape, strides, size,
             requires_grad: false, grad: None, adam_m: None, adam_v: None,
             data_f16: Vec::new(), dtype: Dtype::F32,
+        };
+        if let Some(id) = self.free_ids.pop() {
+            self.tensors[id] = Some(t);
+            id
+        } else {
+            let id = self.tensors.len();
+            self.tensors.push(Some(t));
+            id
+        }
+    }
+
+    /// F16-aware variant of `insert_raw`. Used by permute (and other
+    /// layout-only ops) when the source tensor's storage is F16 — we
+    /// have to carry over `data_f16` AND set the right `dtype`,
+    /// otherwise the new view points at an empty F32 buffer.
+    pub fn insert_raw_f16(
+        &mut self, data_f16: Vec<f16>,
+        shape: Vec<usize>, strides: Vec<usize>, size: usize,
+    ) -> TensorId {
+        use crate::tensor::{Dtype, GpuTensor};
+        let t = GpuTensor {
+            data: Vec::new(), data_f16,
+            shape, strides, size,
+            dtype: Dtype::F16,
+            requires_grad: false, grad: None, adam_m: None, adam_v: None,
         };
         if let Some(id) = self.free_ids.pop() {
             self.tensors[id] = Some(t);
