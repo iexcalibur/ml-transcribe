@@ -1379,7 +1379,10 @@ unsafe fn safetensors_load_inner(
     let result = safetensors::load_into_with_dtype(&path, &mut eng.store, keep_f16);
     match result {
         Ok(loaded) => Box::into_raw(Box::new(LoadedWeightsHandle(loaded))),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!("[safetensors] load failed: {:?}", e);
+            std::ptr::null_mut()
+        }
     }
 }
 

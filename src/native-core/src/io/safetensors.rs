@@ -160,8 +160,22 @@ pub fn load_into_with_dtype(
             store.from_vec_f16(data_f16, &shape)
         } else {
             // Default path: everything ends up as F32 in the store.
-            let data = decode_to_f32(view.dtype(), view.data(), numel)?;
-            store.from_slice(&data, &shape)
+            // Skip dtypes we can't represent in our F32/F16 store
+            // (notably I64 — used by BatchNorm's `num_batches_tracked`,
+            // an inference-irrelevant counter). The skipped tensor's
+            // name doesn't enter `map`, so any consumer that asks
+            // for it gets a clean "missing weight" error.
+            match decode_to_f32(view.dtype(), view.data(), numel) {
+                Ok(data) => store.from_slice(&data, &shape),
+                Err(SafetensorsError::UnsupportedDtype(d)) => {
+                    eprintln!(
+                        "[safetensors] skipping '{}' with unsupported dtype {:?}",
+                        name, d
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         };
         map.insert(name.to_string(), id);
         sorted_names.push(name.to_string());
