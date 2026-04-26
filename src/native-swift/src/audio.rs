@@ -12,30 +12,71 @@
 use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 
-/// HTK mel scale: hz → mels.
-fn hz_to_mel(hz: f32) -> f32 {
+/// HTK mel scale: hz → mels.  `mels = 2595 * log10(1 + hz/700)`.
+/// Used by Whisper (and many others).
+fn hz_to_mel_htk(hz: f32) -> f32 {
     2595.0 * (1.0 + hz / 700.0).log10()
 }
 
 /// HTK mel scale: mels → hz.
-fn mel_to_hz(mel: f32) -> f32 {
+fn mel_to_hz_htk(mel: f32) -> f32 {
     700.0 * (10.0_f32.powf(mel / 2595.0) - 1.0)
+}
+
+/// Slaney mel scale: linear from 0 to 1 kHz (slope 3/200), log above.
+/// This is the librosa default (`htk=False`) and what NeMo /
+/// Cohere Transcribe use.
+fn hz_to_mel_slaney(hz: f32) -> f32 {
+    let f_sp = 200.0 / 3.0;
+    let min_log_hz = 1000.0_f32;
+    let min_log_mel = min_log_hz / f_sp;        // = 15
+    let logstep = (6.4_f32).ln() / 27.0;
+    if hz < min_log_hz {
+        hz / f_sp
+    } else {
+        min_log_mel + (hz / min_log_hz).ln() / logstep
+    }
+}
+
+/// Slaney mel scale: mels → hz.
+fn mel_to_hz_slaney(mel: f32) -> f32 {
+    let f_sp = 200.0 / 3.0;
+    let min_log_hz = 1000.0_f32;
+    let min_log_mel = min_log_hz / f_sp;        // = 15
+    let logstep = (6.4_f32).ln() / 27.0;
+    if mel < min_log_mel {
+        f_sp * mel
+    } else {
+        min_log_hz * (logstep * (mel - min_log_mel)).exp()
+    }
 }
 
 /// Build the mel filterbank as a [n_mels, n_fft/2 + 1] matrix laid out
 /// row-major. Each row is a triangular filter centered on a mel-scale
-/// frequency, with linear ramps to its neighbors.
+/// frequency, with linear ramps to its neighbors. Uses Slaney-style
+/// area normalization (each filter integrates to 1 in Hz).
 ///
-/// Uses Slaney-style normalization (each filter's area = 1), which
-/// matches Whisper / torch.audio defaults. HTK-style (no
-/// normalization) is also common; we don't expose it as a flag yet.
+/// `mel_scale_htk`: if true, use HTK's mel scale (matches Whisper);
+/// if false, use Slaney's mel scale (matches NeMo / Cohere
+/// Transcribe / librosa default).
 fn mel_filterbank(
     sample_rate: u32,
     n_fft: usize,
     n_mels: usize,
     f_min: f32,
     f_max: f32,
+    mel_scale_htk: bool,
 ) -> Vec<f32> {
+    let hz_to_mel: fn(f32) -> f32 = if mel_scale_htk {
+        hz_to_mel_htk
+    } else {
+        hz_to_mel_slaney
+    };
+    let mel_to_hz: fn(f32) -> f32 = if mel_scale_htk {
+        mel_to_hz_htk
+    } else {
+        mel_to_hz_slaney
+    };
     let n_freqs = n_fft / 2 + 1;
     let mel_min = hz_to_mel(f_min);
     let mel_max = hz_to_mel(f_max);
@@ -203,8 +244,12 @@ pub fn log_mel_spectrogram(
     }
 
     // 4. Apply mel filterbank. mel[m, f] = sum_k power[f, k] * fb[m, k].
+    // PerFeature mode mirrors NeMo / Cohere — Slaney mel scale.
+    // Whisper / None modes use HTK to stay bit-compatible with
+    // openai/whisper.
+    let mel_scale_htk = !matches!(mode, NormalizeMode::PerFeature);
     let fb = mel_filterbank(sample_rate, n_fft, n_mels, 0.0,
-                            sample_rate as f32 / 2.0);
+                            sample_rate as f32 / 2.0, mel_scale_htk);
     let mut mel = vec![0.0f32; n_mels * n_frames];
     for m in 0..n_mels {
         for f in 0..n_frames {
