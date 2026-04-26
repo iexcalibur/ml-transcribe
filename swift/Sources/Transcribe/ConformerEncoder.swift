@@ -200,26 +200,33 @@ public final class ConvSubsampling {
         // Conv biases are [C]; reshape to [1, C, 1, 1] for broadcast.
         func b(_ bias: Tensor) -> Tensor { bias.reshape([1, C, 1, 1]) }
 
+        // Layer order matches NeMo's MaskedConvSequential exactly:
+        //   conv0=dense   → ReLU (idx 1)
+        //   conv2=depthwise (no activation between conv2 and conv3)
+        //   conv3=pointwise → ReLU (idx 4)
+        //   conv5=depthwise (no activation between conv5 and conv6)
+        //   conv6=pointwise → ReLU (idx 7)
+        // The depthwise+pointwise pair acts like a single separable
+        // conv, so the ReLU only fires after the pointwise step.
+
         // Layer 1: dense conv, k=3, s=2, p=1, ReLU.
         let h1 = asImage
             .conv2d(weight: weights.conv1Weight, stride: 2, padding: 1, groups: 1)
             .add(b(weights.conv1Bias))
             .relu()
-        // Layer 2: depthwise, k=3, s=2, p=1, groups=C, ReLU.
+        // Layer 2: depthwise, k=3, s=2, p=1, groups=C — NO ReLU.
         let h2 = h1
             .conv2d(weight: weights.conv2Weight, stride: 2, padding: 1, groups: C)
             .add(b(weights.conv2Bias))
-            .relu()
         // Layer 3: pointwise, k=1, ReLU.
         let h3 = h2
             .conv2d(weight: weights.conv3Weight)
             .add(b(weights.conv3Bias))
             .relu()
-        // Layer 4: depthwise, k=3, s=2, p=1, groups=C, ReLU.
+        // Layer 4: depthwise, k=3, s=2, p=1, groups=C — NO ReLU.
         let h4 = h3
             .conv2d(weight: weights.conv4Weight, stride: 2, padding: 1, groups: C)
             .add(b(weights.conv4Bias))
-            .relu()
         // Layer 5: pointwise, k=1, ReLU.
         let h5 = h4
             .conv2d(weight: weights.conv5Weight)

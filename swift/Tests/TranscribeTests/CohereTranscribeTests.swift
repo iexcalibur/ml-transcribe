@@ -174,6 +174,8 @@ final class CohereTranscribeTests: XCTestCase {
             encDecProjB: randTensor([config.encDecProjToDim], rng: &rng),
             embedTokens: randTensor(
                 [config.vocabSize, config.decoderHidden], rng: &rng),
+            embedNormGamma: onesTensor([config.decoderHidden]),
+            embedNormBeta: zerosTensor([config.decoderHidden]),
             decoderLayers: decoderLayerWeights,
             decoderFinalNormGamma: onesTensor([config.decoderHidden]),
             decoderFinalNormBeta: zerosTensor([config.decoderHidden]),
@@ -331,6 +333,8 @@ final class CohereTranscribeTests: XCTestCase {
             encDecProjB: Self.randTensor([config.encDecProjToDim], rng: &rng2),
             embedTokens: Self.randTensor(
                 [config.vocabSize, config.decoderHidden], rng: &rng2),
+            embedNormGamma: Self.onesTensor([config.decoderHidden]),
+            embedNormBeta: Self.zerosTensor([config.decoderHidden]),
             decoderLayers: dlw,
             decoderFinalNormGamma: Self.onesTensor([config.decoderHidden]),
             decoderFinalNormBeta: Self.zerosTensor([config.decoderHidden]),

@@ -95,6 +95,12 @@ public final class CohereTranscribe {
         public let encDecProjB: Tensor              // [decDim]
         // Token embedding.
         public let embedTokens: Tensor              // [V, decDim]
+        // LayerNorm applied AFTER token + position embedding sum,
+        // before the first decoder layer. NeMo's
+        // `TransformerDecoderEmbedding` includes this in the embed
+        // module — it's easy to miss.
+        public let embedNormGamma: Tensor           // [decDim]
+        public let embedNormBeta: Tensor            // [decDim]
         // Decoder layers.
         public let decoderLayers: [DecoderLayer.Weights]
         // Final LayerNorm before the head.
@@ -111,6 +117,7 @@ public final class CohereTranscribe {
             encoderLayers: [ConformerLayer.Weights],
             encDecProjW: Tensor, encDecProjB: Tensor,
             embedTokens: Tensor,
+            embedNormGamma: Tensor, embedNormBeta: Tensor,
             decoderLayers: [DecoderLayer.Weights],
             decoderFinalNormGamma: Tensor,
             decoderFinalNormBeta: Tensor,
@@ -120,6 +127,8 @@ public final class CohereTranscribe {
             self.encoderLayers = encoderLayers
             self.encDecProjW = encDecProjW; self.encDecProjB = encDecProjB
             self.embedTokens = embedTokens
+            self.embedNormGamma = embedNormGamma
+            self.embedNormBeta = embedNormBeta
             self.decoderLayers = decoderLayers
             self.decoderFinalNormGamma = decoderFinalNormGamma
             self.decoderFinalNormBeta = decoderFinalNormBeta
@@ -207,10 +216,17 @@ public final class CohereTranscribe {
         let D = config.decoderHidden
         let pos = decoderLayers[0].cacheLength
 
-        // 1. Token + fixed sinusoidal position embedding.
+        // 1. Token + fixed sinusoidal position embedding, then a
+        // LayerNorm — `TransformerDecoderEmbedding` in the modeling
+        // code applies LN to the SUM of token and position embeddings
+        // before handing off to the layer stack.
         let tokenEmb = weights.embedTokens.embed(tokens: [tokenId])  // [1, 1, D]
         let posRow = decoderPosTable.embed(tokens: [pos])             // [1, 1, D]
-        var h = tokenEmb.add(posRow)
+        var h = tokenEmb.add(posRow).layerNorm(
+            gamma: weights.embedNormGamma,
+            beta:  weights.embedNormBeta,
+            eps:   config.layerNormEps
+        )
 
         // 2. 8 decoder blocks.
         for layer in decoderLayers {
