@@ -186,4 +186,45 @@ public extension WeightMap {
         }
         return s
     }
+
+    /// Set of names that need transposing for a HuggingFace
+    /// `whisper-tiny.en`-style checkpoint loaded through `WhisperTiny`.
+    ///
+    /// `WhisperTiny` reads weights by their original HF names (no
+    /// renames needed) — its expected shapes follow our `[in, out]`
+    /// convention, so every PyTorch `Linear` weight needs a transpose
+    /// on load.
+    ///
+    /// Conv weights `[C_out, C_in, K]` already match our convention
+    /// and stay untouched. LayerNorm gammas/betas are 1-D and are
+    /// also passed through.
+    static func whisperTinyTransposeSet(
+        encoderLayers: Int,
+        decoderLayers: Int
+    ) -> Set<String> {
+        var s: Set<String> = []
+
+        // Encoder Linear weights.
+        for i in 0..<encoderLayers {
+            let base = "model.encoder.layers.\(i)."
+            for proj in ["q", "k", "v", "out"] {
+                s.insert(base + "self_attn.\(proj)_proj.weight")
+            }
+            s.insert(base + "fc1.weight")
+            s.insert(base + "fc2.weight")
+        }
+
+        // Decoder Linear weights — both self_attn and encoder_attn.
+        for i in 0..<decoderLayers {
+            let base = "model.decoder.layers.\(i)."
+            for proj in ["q", "k", "v", "out"] {
+                s.insert(base + "self_attn.\(proj)_proj.weight")
+                s.insert(base + "encoder_attn.\(proj)_proj.weight")
+            }
+            s.insert(base + "fc1.weight")
+            s.insert(base + "fc2.weight")
+        }
+
+        return s
+    }
 }

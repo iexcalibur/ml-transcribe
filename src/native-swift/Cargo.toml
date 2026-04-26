@@ -9,10 +9,15 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-mni_framework_core = { path = "../native-core" }
+mni_framework_core = { path = "../native-core", features = ["simd-fp16"] }
 # Minimal features — we just need load/encode/decode via tokenizer.json.
 # Skips onig (system dep), progressbar, http, etc.
 tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
+# Audio preprocessing (log-mel spectrogram) — universally needed for
+# speech models (Whisper, Conformer, Cohere Transcribe). Pure Rust,
+# no platform deps; cross-compiles to iOS / macOS slices fine.
+rustfft = "6"
+half = "2"
 
 [profile.release]
 lto = true

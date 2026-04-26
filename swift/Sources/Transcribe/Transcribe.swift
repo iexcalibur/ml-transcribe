@@ -122,10 +122,12 @@ public final class Tensor {
         return try? from(data: data, shape: [Int(rows), Int(cols)])
     }
 
-    /// Private designated initializer. Every constructor funnels
-    /// through here. `owner == nil` means we own the id; otherwise
-    /// we're a borrowed view and the owner is responsible for release.
-    fileprivate init(id: UInt32, ownedBy owner: AnyObject? = nil) {
+    /// Module-internal designated initializer. Every constructor —
+    /// including those in other Transcribe sources like
+    /// `AudioPreprocessor` — funnels through here. `owner == nil`
+    /// means we own the id; otherwise we're a borrowed view and the
+    /// owner is responsible for release.
+    internal init(id: UInt32, ownedBy owner: AnyObject? = nil) {
         self.id = id
         self.owner = owner
     }
@@ -251,6 +253,10 @@ public final class Tensor {
     /// Output shape matches. `scale` is typically `1 / sqrt(Float(D))`.
     /// When `causal = true`, position `i` can only attend to positions
     /// `j <= i` (decoder self-attention).
+    ///
+    /// Self-attention only — Q, K, V must share the same seq_len.
+    /// For encoder-decoder attention with different seq_lens, use
+    /// `crossAttention(key:value:scale:)`.
     public func attention(
         key: Tensor,
         value: Tensor,
@@ -260,6 +266,28 @@ public final class Tensor {
         Tensor(id: ml_engine_attention(
             self.id, key.id, value.id, scale, causal ? 1 : 0
         ))
+    }
+
+    /// Cross-attention: Q (self) has shape `[BH, S_q, D]`; K and V
+    /// have shape `[BH, S_kv, D]` with `S_kv` typically much larger
+    /// than `S_q` (encoder output × decoder query). Output shape is
+    /// `[BH, S_q, D]`. Never causal.
+    ///
+    /// Standard usage in encoder-decoder transformers (Whisper, T5,
+    /// Cohere Transcribe): the encoder runs once and produces
+    /// `enc_out`. For each decoder layer, the layer's K/V projections
+    /// turn `enc_out` into a per-layer K, V (computed once per
+    /// inference and reused across decoding steps). At each decode
+    /// step, the decoder's Q queries those static K, V via this op.
+    public func crossAttention(
+        key: Tensor,
+        value: Tensor,
+        scale: Float
+    ) -> Tensor {
+        let id = ml_engine_cross_attention(self.id, key.id, value.id, scale)
+        precondition(id != UInt32.max,
+            "crossAttention: shape mismatch (Q \(shape), K \(key.shape), V \(value.shape))")
+        return Tensor(id: id)
     }
 
     // MARK: - Layout (reshape / transpose / contiguous)
@@ -323,6 +351,22 @@ public final class Tensor {
             return self
         }
         return Tensor(id: newId)
+    }
+
+    /// 1-D convolution. PyTorch convention:
+    /// - `self`   shape `[N, C_in,  L]`
+    /// - `weight` shape `[C_out, C_in, K]`
+    /// - output   shape `[N, C_out, L_out]` where
+    ///   `L_out = (L + 2*padding - K) / stride + 1`.
+    ///
+    /// No bias and no groups in this op — add bias separately via
+    /// `.add(bias)`. Depthwise conv (where groups == C_in) is a
+    /// future FFI; for now `weight` must use a single-group
+    /// (dense) layout.
+    public func conv1d(weight: Tensor, stride: Int = 1, padding: Int = 0) -> Tensor {
+        Tensor(id: ml_engine_conv1d(
+            self.id, weight.id, UInt64(stride), UInt64(padding)
+        ))
     }
 
     /// PyTorch's `repeat_interleave`: duplicates each slice along `dim`

@@ -67,8 +67,15 @@ uint32_t ml_engine_rmsnorm(uint32_t x, uint32_t gamma, float eps);
 
 // Scaled dot-product attention. q/k/v are [BH, S, D]; output is same.
 // Pass causal=1 for decoder-style masking, 0 for full attention.
+// Self-attention only — Q, K, V must share the same seq_len.
 uint32_t ml_engine_attention(uint32_t q, uint32_t k, uint32_t v,
                              float scale, int32_t causal);
+
+// Cross-attention: Q at its own seq_len, K and V at a (typically
+// larger) different seq_len. Never causal. Shapes:
+//   Q: [BH, S_q, D], K: [BH, S_kv, D], V: [BH, S_kv, D] → [BH, S_q, D].
+uint32_t ml_engine_cross_attention(uint32_t q, uint32_t k, uint32_t v,
+                                   float scale);
 
 // Layout: reshape / permute / contiguous.
 // - reshape: product(new_shape) must equal numel(a).
@@ -83,6 +90,14 @@ uint32_t ml_engine_contiguous(uint32_t a);
 // Primary use: GQA broadcasting of K/V heads across Q groups.
 uint32_t ml_engine_repeat_interleave(uint32_t a, int32_t dim, uint32_t repeats);
 
+// 1-D convolution, PyTorch convention:
+//   input  [N, C_in,  L]
+//   weight [C_out, C_in, K]
+//   output [N, C_out, L_out] where L_out = (L + 2*padding - K) / stride + 1
+// No bias / no groups; apply bias via add() separately.
+uint32_t ml_engine_conv1d(uint32_t input, uint32_t weight,
+                          uint64_t stride, uint64_t padding);
+
 // Embedding lookup. weight is [vocab_size, embed_dim]; indices is a
 // flat buffer of length (batch * seq_len). Output shape is
 // [batch, seq_len, embed_dim]. Each index must be in 0..vocab_size.
@@ -95,6 +110,18 @@ uint32_t ml_engine_embedding(uint32_t weight,
 // useful when decoding incrementally with a KV cache. base is typically
 // 10000.0.
 uint32_t ml_engine_rope(uint32_t x, uint64_t start_pos, float base);
+
+// ---------------------------------------------------------------------------
+// Audio preprocessing.
+//
+// Whisper-compatible log-mel spectrogram:
+//   sample_rate = 16000, n_fft = 400, hop_length = 160, n_mels = 80
+// Output: TensorId of shape [n_mels, n_frames].
+// ---------------------------------------------------------------------------
+
+uint32_t ml_engine_log_mel_spectrogram(const float* samples, uint64_t samples_len,
+                                       uint32_t sample_rate, uint64_t n_fft,
+                                       uint64_t hop_length, uint64_t n_mels);
 
 // ---------------------------------------------------------------------------
 // Tokenizer (HuggingFace tokenizer.json format).

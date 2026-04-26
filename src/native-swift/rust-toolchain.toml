@@ -1,0 +1,13 @@
+# Pinned to stable Rust 1.94+ for `std::arch::aarch64::vcvt_f32_f16`,
+# stabilized in 1.94 (was nightly-only `stdarch_neon_f16` in 1.93 and
+# earlier). Used by the `simd-fp16` Cargo feature in
+# mni_framework_core to do 4-at-a-time NEON F16→F32 conversion in the
+# matmul kernel.
+#
+# This file's scope is just src/native-swift/ and its dependency
+# graph (which pulls in native-core with simd-fp16 enabled). The Node
+# N-API crate (src/native/) inherits whatever rustup default is set,
+# typically also stable.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]

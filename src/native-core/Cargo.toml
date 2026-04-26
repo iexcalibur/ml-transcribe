@@ -12,6 +12,11 @@ default = ["cpu"]
 cpu = []
 cuda = ["dep:cudarc"]
 webgpu = ["dep:wgpu", "dep:pollster"]
+# True NEON F16 SIMD via std::arch::aarch64::vcvt_f32_f16. Requires
+# nightly Rust (see rust-lang/rust#136306). Off by default; enable
+# from the Swift FFI crate (which pins nightly via its own
+# rust-toolchain.toml) to get F16 matmul at F32 speed on Apple Silicon.
+simd-fp16 = []
 
 [dependencies]
 bytemuck = { version = "1.14", features = ["derive"] }

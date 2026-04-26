@@ -30,6 +30,8 @@
 //! - Ops like `ml_engine_matmul` expect shape-compatible operands; the
 //!   underlying Rust ops will `panic!` on mismatched shapes.
 
+mod audio;
+
 use mni_framework_core::autograd::Tape;
 use mni_framework_core::io::safetensors;
 use mni_framework_core::ops;
@@ -344,6 +346,10 @@ pub extern "C" fn ml_engine_layernorm(x: u32, gamma: u32, beta: u32, eps: f32) -
 /// Named "flash" in the core because it's computed in a streaming
 /// online-softmax manner (no materialized NxN attention matrix), but
 /// for Swift callers it behaves as standard SDPA.
+///
+/// Self-attention only — Q, K, V must all have the same seq_len.
+/// For cross-attention with different seq_lens, see
+/// `ml_engine_cross_attention`.
 #[no_mangle]
 pub extern "C" fn ml_engine_attention(
     q: u32,
@@ -363,6 +369,98 @@ pub extern "C" fn ml_engine_attention(
         store,
         tape,
     ) as u32
+}
+
+/// Cross-attention: standard scaled dot-product attention where Q
+/// has its own seq_len (the decoder's current step or window) and
+/// K, V have a different, typically larger seq_len (the encoder's
+/// output). Never causal — every Q position can see every K position.
+///
+/// Shapes:
+///   Q: [BH, S_q, D]
+///   K: [BH, S_kv, D]    (K and V must agree on S_kv)
+///   V: [BH, S_kv, D]
+///   out: [BH, S_q, D]
+///
+/// `scale` is typically `1.0 / sqrt(Float(D))`. Returns `INVALID_ID`
+/// on shape mismatch.
+///
+/// Why this is separate from `ml_engine_attention`: that op's flash
+/// kernel assumes Q.seq_len == K.seq_len for the streaming-softmax
+/// math. Cross-attention with S_q ≠ S_kv needs a different inner
+/// loop, and we don't need its KV-cache machinery (encoder K, V are
+/// computed once per inference, never appended).
+#[no_mangle]
+pub extern "C" fn ml_engine_cross_attention(
+    q: u32,
+    k: u32,
+    v: u32,
+    scale: f32,
+) -> u32 {
+    let mut eng = engine().lock().unwrap();
+    let store = &mut eng.store;
+
+    let q_shape = store.shape(q as TensorId).to_vec();
+    let k_shape = store.shape(k as TensorId).to_vec();
+    let v_shape = store.shape(v as TensorId).to_vec();
+
+    if q_shape.len() != 3 || k_shape.len() != 3 || v_shape.len() != 3 {
+        return INVALID_ID;
+    }
+    let bh = q_shape[0];
+    let s_q = q_shape[1];
+    let d = q_shape[2];
+    let s_kv = k_shape[1];
+    if k_shape[0] != bh || v_shape[0] != bh
+       || k_shape[2] != d || v_shape[2] != d
+       || v_shape[1] != s_kv
+    {
+        return INVALID_ID;
+    }
+
+    let q_data = store.to_host(q as TensorId);
+    let k_data = store.to_host(k as TensorId);
+    let v_data = store.to_host(v as TensorId);
+    let mut out = vec![0.0f32; bh * s_q * d];
+
+    for b in 0..bh {
+        for q_row in 0..s_q {
+            // 1. scores[k_row] = (Q · K) * scale, with running max for
+            //    numerical stability.
+            let mut scores = vec![0.0f32; s_kv];
+            let mut max_score = f32::NEG_INFINITY;
+            for k_row in 0..s_kv {
+                let mut dot = 0.0f32;
+                for dd in 0..d {
+                    dot += q_data[b * s_q * d + q_row * d + dd]
+                         * k_data[b * s_kv * d + k_row * d + dd];
+                }
+                let s = dot * scale;
+                scores[k_row] = s;
+                if s > max_score {
+                    max_score = s;
+                }
+            }
+            // 2. Softmax over scores.
+            let mut sum_exp = 0.0f32;
+            for k_row in 0..s_kv {
+                let e = (scores[k_row] - max_score).exp();
+                scores[k_row] = e;
+                sum_exp += e;
+            }
+            // 3. Weighted sum: out[q_row] = Σ softmax[k_row] · V[k_row].
+            for dd in 0..d {
+                let mut acc = 0.0f32;
+                for k_row in 0..s_kv {
+                    acc += scores[k_row]
+                         * v_data[b * s_kv * d + k_row * d + dd];
+                }
+                out[b * s_q * d + q_row * d + dd] = acc / sum_exp;
+            }
+        }
+    }
+
+    store.from_slice(&out, &[bh, s_q, d]) as u32
 }
 
 // ===========================================================================
@@ -427,6 +525,34 @@ pub extern "C" fn ml_engine_contiguous(a: u32) -> u32 {
     let mut eng = engine().lock().unwrap();
     let Engine { store, tape, .. } = &mut *eng;
     ops::layout::contiguous(a as TensorId, store, tape) as u32
+}
+
+/// 1-D convolution. PyTorch convention:
+/// - `input`  shape `[N, C_in,  L]`
+/// - `weight` shape `[C_out, C_in, K]`
+/// - output   shape `[N, C_out, L_out]`
+///   where `L_out = (L + 2*padding - K) / stride + 1`.
+///
+/// No bias and no groups (single-group / "dense" conv only). Apply
+/// bias separately via `.add(bias)`. Depthwise conv (groups == C_in)
+/// will be a follow-up FFI.
+#[no_mangle]
+pub extern "C" fn ml_engine_conv1d(
+    input: u32,
+    weight: u32,
+    stride: u64,
+    padding: u64,
+) -> u32 {
+    let mut eng = engine().lock().unwrap();
+    let Engine { store, tape, .. } = &mut *eng;
+    ops::conv::conv1d_forward(
+        input as TensorId,
+        weight as TensorId,
+        stride as usize,
+        padding as usize,
+        store,
+        tape,
+    ) as u32
 }
 
 /// Repeat each slice along `dim` `repeats` times, consecutively
@@ -655,6 +781,50 @@ pub extern "C" fn ml_engine_rope(x: u32, start_pos: u64, base: f32) -> u32 {
     }
 
     eng.store.from_slice(&out, &x_shape) as u32
+}
+
+// ===========================================================================
+// FFI: audio preprocessing (log-mel spectrogram)
+// ===========================================================================
+//
+// Produces a Whisper-compatible log-mel spectrogram from raw audio
+// samples. Output is registered as a normal `TensorId` in the engine
+// store, so downstream ops (matmul, conv, etc.) consume it like any
+// other tensor.
+
+/// Compute a Whisper-style log-mel spectrogram and return the result
+/// as a TensorId of shape `[n_mels, n_frames]`.
+///
+/// Defaults match Whisper exactly: pass `sample_rate=16000`, `n_fft=400`,
+/// `hop_length=160`, `n_mels=80`.
+///
+/// Returns `INVALID_ID` on null `samples_ptr` or zero-length input.
+///
+/// # Safety
+/// `samples_ptr` must point to at least `samples_len` valid `f32`
+/// values.
+#[no_mangle]
+pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
+    samples_ptr: *const f32,
+    samples_len: u64,
+    sample_rate: u32,
+    n_fft: u64,
+    hop_length: u64,
+    n_mels: u64,
+) -> u32 {
+    if samples_ptr.is_null() || samples_len == 0 {
+        return INVALID_ID;
+    }
+    let samples = std::slice::from_raw_parts(samples_ptr, samples_len as usize);
+    let (data, shape) = audio::log_mel_spectrogram(
+        samples,
+        sample_rate,
+        n_fft as usize,
+        hop_length as usize,
+        n_mels as usize,
+    );
+    let mut eng = engine().lock().unwrap();
+    eng.store.from_slice(&data, &shape) as u32
 }
 
 // ===========================================================================

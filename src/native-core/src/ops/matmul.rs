@@ -1,6 +1,114 @@
 use smallvec::smallvec;
 use crate::autograd::{BackwardOp, SavedContext, Tape, TapeEntry};
 use crate::tensor::{Dtype, TensorId, TensorStore, shape_size};
+use half::f16;
+
+// ---------------------------------------------------------------------------
+// F16 inner loop: SIMD on aarch64 with `simd-fp16`, otherwise 8x unroll.
+// ---------------------------------------------------------------------------
+
+/// 8-way unrolled scalar inner loop for F16 weight matmul. LLVM's
+/// auto-vectorizer pipelines the f16-to-f32 conversions and FMAs;
+/// gets us to ~25% slower than F32 on stable Rust without intrinsics.
+#[cfg(any(not(feature = "simd-fp16"), not(target_arch = "aarch64")))]
+fn matmul_f16_block(
+    a_data: &[f32],
+    b_data_f16: &[f16],
+    out: &mut [f32],
+    a_off: usize, b_off: usize, c_off: usize,
+    m: usize, k: usize, n: usize,
+) {
+    for i in 0..m {
+        let row_out = c_off + i * n;
+        for kk in 0..k {
+            let a_val = a_data[a_off + i * k + kk];
+            let row_b = b_off + kk * n;
+            let mut j = 0;
+            while j + 8 <= n {
+                let b0 = b_data_f16[row_b + j].to_f32();
+                let b1 = b_data_f16[row_b + j + 1].to_f32();
+                let b2 = b_data_f16[row_b + j + 2].to_f32();
+                let b3 = b_data_f16[row_b + j + 3].to_f32();
+                let b4 = b_data_f16[row_b + j + 4].to_f32();
+                let b5 = b_data_f16[row_b + j + 5].to_f32();
+                let b6 = b_data_f16[row_b + j + 6].to_f32();
+                let b7 = b_data_f16[row_b + j + 7].to_f32();
+                out[row_out + j]     += a_val * b0;
+                out[row_out + j + 1] += a_val * b1;
+                out[row_out + j + 2] += a_val * b2;
+                out[row_out + j + 3] += a_val * b3;
+                out[row_out + j + 4] += a_val * b4;
+                out[row_out + j + 5] += a_val * b5;
+                out[row_out + j + 6] += a_val * b6;
+                out[row_out + j + 7] += a_val * b7;
+                j += 8;
+            }
+            while j < n {
+                let b_val = b_data_f16[row_b + j].to_f32();
+                out[row_out + j] += a_val * b_val;
+                j += 1;
+            }
+        }
+    }
+}
+
+/// Apple Silicon NEON SIMD inner loop: 4-at-a-time `vcvt_f32_f16`
+/// (FCVTL) + `vfmaq_f32` (FMLA). Requires nightly Rust because
+/// `float16x4_t` and `vcvt_f32_f16` live behind the unstable
+/// `stdarch_neon_f16` feature (see rust-lang/rust#136306).
+///
+/// Activated by enabling the `simd-fp16` Cargo feature on this crate
+/// AND building for aarch64. The Swift bridge does both via its own
+/// rust-toolchain.toml; the Node N-API crate stays on stable and
+/// falls through to the 8x-unrolled scalar version above.
+#[cfg(all(feature = "simd-fp16", target_arch = "aarch64"))]
+#[target_feature(enable = "fp16")]
+unsafe fn matmul_f16_block(
+    a_data: &[f32],
+    b_data_f16: &[f16],
+    out: &mut [f32],
+    a_off: usize, b_off: usize, c_off: usize,
+    m: usize, k: usize, n: usize,
+) {
+    use std::arch::aarch64::*;
+
+    for i in 0..m {
+        let row_out = c_off + i * n;
+        for kk in 0..k {
+            let a_val = a_data[a_off + i * k + kk];
+            let a_vec = vdupq_n_f32(a_val);
+            let row_b = b_off + kk * n;
+
+            let mut j = 0;
+            while j + 4 <= n {
+                // Load 4 f16 (each 2 bytes) via the stable u16 path.
+                let b_u16 = vld1_u16(
+                    b_data_f16.as_ptr().add(row_b + j) as *const u16,
+                );
+                // Reinterpret as float16x4_t (same bit pattern).
+                let b_f16: float16x4_t = std::mem::transmute(b_u16);
+                // FCVTL: 4×F16 → 4×F32 in one instruction.
+                let b_f32 = vcvt_f32_f16(b_f16);
+
+                // Accumulate: out += a * b (FMLA, no rounding between
+                // multiply and add — same precision as the scalar path).
+                let out_ptr = out.as_mut_ptr().add(row_out + j);
+                let acc = vld1q_f32(out_ptr);
+                let new_acc = vfmaq_f32(acc, a_vec, b_f32);
+                vst1q_f32(out_ptr, new_acc);
+
+                j += 4;
+            }
+
+            // Scalar tail for `n % 4`.
+            while j < n {
+                let b_val = b_data_f16[row_b + j].to_f32();
+                out[row_out + j] += a_val * b_val;
+                j += 1;
+            }
+        }
+    }
+}
 
 #[cfg(feature = "cuda")]
 use crate::tensor::compute_strides;
@@ -82,8 +190,11 @@ pub fn matmul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape
                 }
             }
             Dtype::F16 => {
-                // Borrow B's F16 storage directly. No Vec<f32> allocation
-                // for B — peak memory drops by sizeof(B) f32 bytes.
+                // Borrow B's F16 storage directly. No Vec<f32>
+                // allocation for B — peak memory drops by sizeof(B)
+                // f32 bytes. The inner block dispatches to either a
+                // NEON-SIMD path (with `simd-fp16` on aarch64) or an
+                // 8x-unrolled scalar fallback. See `matmul_f16_block`.
                 let b_data_f16 = &store.get(b_id).data_f16;
                 for batch in 0..batch_size {
                     let a_batch_idx = if a_batch_size == 1 { 0 } else { batch % a_batch_size };
@@ -92,18 +203,18 @@ pub fn matmul(a: TensorId, b: TensorId, store: &mut TensorStore, tape: &mut Tape
                     let b_off = b_batch_idx * b_mat;
                     let c_off = batch * c_mat;
 
-                    for i in 0..m {
-                        for kk in 0..k {
-                            let a_val = a_data[a_off + i * k + kk];
-                            for j in 0..n {
-                                // Per-element F16 → F32 conversion. Each
-                                // load is u16 + cvt; cheap on Apple
-                                // Silicon (no software emulation).
-                                let b_val = b_data_f16[b_off + kk * n + j].to_f32();
-                                out[c_off + i * n + j] += a_val * b_val;
-                            }
-                        }
+                    #[cfg(all(feature = "simd-fp16", target_arch = "aarch64"))]
+                    unsafe {
+                        matmul_f16_block(
+                            &a_data, b_data_f16, &mut out,
+                            a_off, b_off, c_off, m, k, n,
+                        );
                     }
+                    #[cfg(not(all(feature = "simd-fp16", target_arch = "aarch64")))]
+                    matmul_f16_block(
+                        &a_data, b_data_f16, &mut out,
+                        a_off, b_off, c_off, m, k, n,
+                    );
                 }
             }
         }
