@@ -921,6 +921,65 @@ pub extern "C" fn ml_engine_rope(x: u32, start_pos: u64, base: f32) -> u32 {
     eng.store.from_slice(&out, &x_shape) as u32
 }
 
+/// Transformer-XL relative-position shift.
+///
+/// Input  shape: `[B, H, T, 2T-1]` (the `q_v @ p.T` matrix in
+///                relative-positional self-attention).
+/// Output shape: `[B, H, T, T]`.
+///
+/// Output is the gather:
+///   out[b, h, i, k] = x[b, h, i, (T-1) - k + i]
+///
+/// This realigns each row's relative-offset columns onto absolute key
+/// positions, so the result can be added to the standard `Q @ K.T`
+/// content-attention matrix and softmax'd.
+///
+/// Returns `INVALID_ID` on shape errors (must be exactly 4-D and the
+/// last two dims must satisfy `last == 2 * second_to_last - 1`).
+#[no_mangle]
+pub extern "C" fn ml_engine_rel_shift(x: u32) -> u32 {
+    let mut eng = engine().lock().unwrap();
+    let x_shape = eng.store.shape(x as TensorId).to_vec();
+    if x_shape.len() != 4 {
+        return INVALID_ID;
+    }
+    let b = x_shape[0];
+    let h = x_shape[1];
+    let t = x_shape[2];
+    let pos_len = x_shape[3];
+    if pos_len != 2 * t - 1 {
+        return INVALID_ID;
+    }
+    let x_data = eng.store.to_host(x as TensorId);
+    let mut out = vec![0.0f32; b * h * t * t];
+
+    // Strides for input [B, H, T, 2T-1].
+    let in_stride_b = h * t * pos_len;
+    let in_stride_h = t * pos_len;
+    let in_stride_t = pos_len;
+    // Strides for output [B, H, T, T].
+    let out_stride_b = h * t * t;
+    let out_stride_h = t * t;
+    let out_stride_t = t;
+
+    for bi in 0..b {
+        for hi in 0..h {
+            for i in 0..t {
+                let in_row = bi * in_stride_b + hi * in_stride_h + i * in_stride_t;
+                let out_row = bi * out_stride_b + hi * out_stride_h + i * out_stride_t;
+                // src column for output (i, k) is (T-1) + i - k. Range
+                // [i, (T-1)+i] which always lies within [0, 2T-2].
+                for k in 0..t {
+                    let src = (t - 1) + i - k;
+                    out[out_row + k] = x_data[in_row + src];
+                }
+            }
+        }
+    }
+
+    eng.store.from_slice(&out, &[b, h, t, t]) as u32
+}
+
 // ===========================================================================
 // FFI: audio preprocessing (log-mel spectrogram)
 // ===========================================================================

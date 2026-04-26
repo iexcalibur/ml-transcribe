@@ -133,6 +133,16 @@ uint32_t ml_engine_embedding(uint32_t weight,
 // 10000.0.
 uint32_t ml_engine_rope(uint32_t x, uint64_t start_pos, float base);
 
+// Transformer-XL relative-position shift, used inside Conformer's
+// `RelPositionMultiHeadAttention`.
+//   input  shape: [B, H, T, 2T-1]
+//   output shape: [B, H, T, T]
+// Output is the gather  out[b,h,i,k] = x[b,h,i, (T-1) - k + i],
+// realigning each row's relative-offset columns onto absolute key
+// positions. Returns INVALID_ID if the input is not 4-D or the last
+// dim is not 2*T-1.
+uint32_t ml_engine_rel_shift(uint32_t x);
+
 // ---------------------------------------------------------------------------
 // Audio preprocessing.
 //

@@ -425,6 +425,24 @@ public final class Tensor {
         Tensor(id: ml_engine_glu(self.id, Int32(dim)))
     }
 
+    /// Transformer-XL relative-position shift.
+    ///
+    /// Input  shape: `[B, H, T, 2T-1]` — typically `(Q + posBiasV) @
+    /// posEmb.T` where `posEmb` covers offsets in `[-(T-1), (T-1)]`.
+    /// Output shape: `[B, H, T, T]`.
+    ///
+    /// The op realigns each row's relative-offset columns onto
+    /// absolute key positions:
+    ///
+    ///     out[b, h, i, k] = self[b, h, i, (T-1) + i - k]
+    ///
+    /// so the result can be added to the standard `Q @ K.T` content-
+    /// attention matrix and softmax'd. Used inside Conformer's
+    /// `RelPositionMultiHeadAttention`.
+    public func relShift() -> Tensor {
+        Tensor(id: ml_engine_rel_shift(self.id))
+    }
+
     /// PyTorch's `repeat_interleave`: duplicates each slice along `dim`
     /// `repeats` times consecutively. For input shape `[..., d_k, ...]`
     /// with `dim = k`, output shape is `[..., d_k * repeats, ...]`.
