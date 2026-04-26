@@ -8,12 +8,17 @@ final class RelPosSelfAttentionTests: XCTestCase {
 
     // MARK: - rel_shift gather correctness
 
-    /// For T=3, the gather should emit
+    /// For T=3, NeMo's `rel_shift` produces the gather
     ///
-    ///     out[0, 0, i, k] = x[0, 0, i, (T-1) - k + i] = x[0, 0, i, 2 - k + i]
+    ///     out[0, 0, i, k] = x[0, 0, i, (T-1) - i + k] = x[0, 0, i, 2 - i + k]
     ///
     /// With encoded values `x[0, 0, i, j] = 10*i + j`, that produces
-    /// the row-by-row pattern below.
+    /// the row-by-row pattern:
+    ///   i=0: cols [2, 3, 4]
+    ///   i=1: cols [1, 2, 3]
+    ///   i=2: cols [0, 1, 2]
+    ///
+    /// (Equivalent to the pad-then-reshape trick in NeMo's source.)
     func testRelShiftSmallHandComputed() throws {
         let T = 3
         let posLen = 2 * T - 1     // 5
@@ -26,11 +31,10 @@ final class RelPosSelfAttentionTests: XCTestCase {
         let x = try Tensor.from(data: data, shape: [1, 1, T, posLen])
         let out = x.relShift().toArray()
 
-        // Hand-derived: for i=0 → cols [2,1,0]; i=1 → [3,2,1]; i=2 → [4,3,2]
         let expected: [Float] = [
-            /* i=0 */  2,  1,  0,
-            /* i=1 */ 13, 12, 11,
-            /* i=2 */ 24, 23, 22,
+            /* i=0 */  2,  3,  4,
+            /* i=1 */ 11, 12, 13,
+            /* i=2 */ 20, 21, 22,
         ]
         XCTAssertEqual(out, expected)
     }

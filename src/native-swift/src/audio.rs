@@ -115,14 +115,45 @@ pub enum NormalizeMode {
 ///
 /// `mode` selects the post-spectrogram normalization. See
 /// `NormalizeMode` for the three variants.
+///
+/// `n_window_size` is the length of the Hann window applied to each
+/// frame. It can be smaller than `n_fft` — Cohere Transcribe uses
+/// window=400 with FFT=512, padding the windowed signal with zeros
+/// up to `n_fft` before FFT. Pass 0 to default to `n_fft` (Whisper
+/// convention, where window length == FFT length).
+///
+/// `preemph` applies a first-order pre-emphasis filter to the audio
+/// BEFORE windowing: `y[i] = x[i] - preemph * x[i-1]`. NeMo /
+/// Cohere Transcribe use `0.97`. Pass `0.0` to skip.
 pub fn log_mel_spectrogram(
     samples: &[f32],
     sample_rate: u32,
     n_fft: usize,
     hop_length: usize,
     n_mels: usize,
+    n_window_size: usize,
+    preemph: f32,
     mode: NormalizeMode,
 ) -> (Vec<f32>, Vec<usize>) {
+    let n_window_size = if n_window_size == 0 { n_fft } else { n_window_size };
+    assert!(n_window_size <= n_fft,
+        "n_window_size {} must be <= n_fft {}", n_window_size, n_fft);
+
+    // 0. Pre-emphasis: y[i] = x[i] - α * x[i-1]. Boost high
+    //    frequencies, matching what the model was trained on.
+    let samples_owned: Vec<f32>;
+    let samples: &[f32] = if preemph != 0.0 && samples.len() > 0 {
+        let mut y = vec![0.0f32; samples.len()];
+        y[0] = samples[0];
+        for i in 1..samples.len() {
+            y[i] = samples[i] - preemph * samples[i - 1];
+        }
+        samples_owned = y;
+        &samples_owned
+    } else {
+        samples
+    };
+
     // 1. Pad reflectively by n_fft/2 on each side so the first/last
     //    frames are centered — matches `center=True` in librosa.
     let pad = n_fft / 2;
@@ -136,11 +167,17 @@ pub fn log_mel_spectrogram(
         padded.push(samples[idx.min(samples.len() - 1)]);
     }
 
-    // 2. Frame into `[n_frames, n_fft]` with `hop_length` stride,
-    //    multiply by Hann window.
-    let window = hann_window(n_fft);
+    // 2. Frame into `[n_frames, n_fft]` with `hop_length` stride.
+    //    Each frame: apply the Hann window over the first
+    //    `n_window_size` samples, leave the rest as zeros (so the
+    //    FFT input is window-applied + zero-padded if window < n_fft).
+    let window = hann_window(n_window_size);
     let n_frames = (padded.len() - n_fft) / hop_length + 1;
     let n_freqs = n_fft / 2 + 1;
+    // The window is centered inside the n_fft frame for sym alignment
+    // with PyTorch/torchaudio: when window_size < n_fft, samples are
+    // taken from offset (n_fft - n_window_size) / 2.
+    let win_offset = (n_fft - n_window_size) / 2;
 
     // 3. Run FFT for each frame; collect magnitude squared (power).
     let mut planner = FftPlanner::<f32>::new();
@@ -150,8 +187,14 @@ pub fn log_mel_spectrogram(
 
     for f in 0..n_frames {
         let off = f * hop_length;
+        // Zero out the buf, then fill the windowed slice.
         for i in 0..n_fft {
-            buf[i] = Complex32::new(padded[off + i] * window[i], 0.0);
+            buf[i] = Complex32::new(0.0, 0.0);
+        }
+        for i in 0..n_window_size {
+            buf[win_offset + i] = Complex32::new(
+                padded[off + win_offset + i] * window[i], 0.0
+            );
         }
         fft.process(&mut buf);
         for k in 0..n_freqs {
@@ -173,9 +216,23 @@ pub fn log_mel_spectrogram(
         }
     }
 
-    // 5. log10 with floor at 1e-10.
-    for x in mel.iter_mut() {
-        *x = x.max(1e-10).log10();
+    // 5. log with mode-dependent zero-guard.
+    //    Whisper:    clamp x to ≥ 1e-10, then log10.
+    //    PerFeature: NeMo's `log_zero_guard_type="add"`: ADD 2^-24,
+    //                then natural log (NeMo uses ln, not log10).
+    //    None:       same as Whisper for backward-compat.
+    match mode {
+        NormalizeMode::PerFeature => {
+            let guard = (2.0f32).powi(-24);
+            for x in mel.iter_mut() {
+                *x = (*x + guard).ln();
+            }
+        }
+        _ => {
+            for x in mel.iter_mut() {
+                *x = x.max(1e-10).log10();
+            }
+        }
     }
 
     // 6. Mode-specific normalization.
@@ -190,23 +247,25 @@ pub fn log_mel_spectrogram(
             }
         }
         NormalizeMode::PerFeature => {
-            // Per-mel-bin zero-mean / unit-variance across frames.
-            // mel layout is [n_mels, n_frames]; each row is one bin.
-            let inv_n = 1.0 / (n_frames as f32);
+            // Per-mel-bin zero-mean / unit-variance across frames,
+            // using N-1 (sample variance) like NeMo. eps is added to
+            // the std (not inside the sqrt) to match NeMo exactly.
+            let denom = (n_frames as f32) - 1.0;
+            let dither = 1e-5f32;
             for m in 0..n_mels {
                 let row_off = m * n_frames;
                 let mut mean = 0.0f32;
                 for f in 0..n_frames {
                     mean += mel[row_off + f];
                 }
-                mean *= inv_n;
+                mean /= n_frames as f32;
                 let mut var = 0.0f32;
                 for f in 0..n_frames {
                     let d = mel[row_off + f] - mean;
                     var += d * d;
                 }
-                var *= inv_n;
-                let inv_std = 1.0 / (var.sqrt() + 1e-5);
+                var /= denom.max(1.0);
+                let inv_std = 1.0 / (var.sqrt() + dither);
                 for f in 0..n_frames {
                     mel[row_off + f] = (mel[row_off + f] - mean) * inv_std;
                 }
@@ -230,7 +289,8 @@ mod tests {
     fn mel_of_dc_signal_is_finite() {
         let samples = vec![1.0f32; 16000]; // 1 second of DC at 16 kHz
         let (mel, shape) = log_mel_spectrogram(
-            &samples, 16000, 400, 160, 80, NormalizeMode::Whisper);
+            &samples, 16000, 400, 160, 80, /*n_window_size=*/ 0,
+            /*preemph=*/ 0.0, NormalizeMode::Whisper);
         assert_eq!(shape, vec![80, 101]);
         for &x in mel.iter() {
             assert!(x.is_finite(), "non-finite value in mel: {}", x);
@@ -249,7 +309,8 @@ mod tests {
             .map(|i| (2.0 * std::f32::consts::PI * freq * (i as f32) / (sr as f32)).sin())
             .collect();
         let (mel, shape) = log_mel_spectrogram(
-            &samples, sr, 400, 160, 80, NormalizeMode::Whisper);
+            &samples, sr, 400, 160, 80, /*n_window_size=*/ 0,
+            /*preemph=*/ 0.0, NormalizeMode::Whisper);
         assert_eq!(shape, vec![80, 101]);
 
         // Average energy per mel bin (across frames). Find the argmax.
@@ -286,7 +347,8 @@ mod tests {
             })
             .collect();
         let (mel, shape) = log_mel_spectrogram(
-            &samples, sr, 400, 160, 80, NormalizeMode::PerFeature);
+            &samples, sr, 400, 160, 80, /*n_window_size=*/ 0,
+            /*preemph=*/ 0.0, NormalizeMode::PerFeature);
         let n_mels = shape[0];
         let n_frames = shape[1];
         for m in 0..n_mels {

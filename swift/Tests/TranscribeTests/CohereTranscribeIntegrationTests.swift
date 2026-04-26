@@ -307,15 +307,30 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
         let cap = min(samples.count, 30 * 16_000)
         let padded = Array(samples.prefix(cap))
 
-        // Decoder priming: just the canonical decoder_start_token_id.
-        // We picked 13764 from generation_config.json; if that's
-        // insufficient for the model to know it should be transcribing
-        // English, the output will be visibly off and we'll iterate.
+        // Decoder priming: the full prompt format from
+        // `modeling_cohere_asr.py.build_prompt(language='en',
+        // punctuation=True)`:
+        //   <|startofcontext|><|startoftranscript|><|emo:undefined|>
+        //   <|en|><|en|><|pnc|><|noitn|><|notimestamp|><|nodiarize|>
+        //
+        // Token IDs (looked up from tokenizer.json's added_tokens):
+        let promptTokens: [Int] = [
+            7,    // <|startofcontext|>
+            4,    // <|startoftranscript|>
+            16,   // <|emo:undefined|>
+            62,   // <|en|>            (source_lang)
+            62,   // <|en|>            (target_lang)
+            5,    // <|pnc|>
+            9,    // <|noitn|>
+            11,   // <|notimestamp|>
+            13,   // <|nodiarize|>
+        ]
         let stderr = FileHandle.standardError
         func say(_ s: String) {
             stderr.write(("[step] " + s + "\n").data(using: .utf8)!)
         }
         say("audio: \(padded.count / 16_000) sec, \(padded.count) samples")
+        say("prompt: \(promptTokens)")
 
         say("running mel + encoder + cross-attn prefill...")
         model.reset()
@@ -329,7 +344,6 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
 
         say("greedy decode (max 30 tokens)...")
         let t1 = Date()
-        let promptTokens = [13764]
         var tokens: [Int] = []
         var nextTok = -1
         for tok in promptTokens {

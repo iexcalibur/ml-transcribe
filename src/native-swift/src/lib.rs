@@ -921,21 +921,23 @@ pub extern "C" fn ml_engine_rope(x: u32, start_pos: u64, base: f32) -> u32 {
     eng.store.from_slice(&out, &x_shape) as u32
 }
 
-/// Transformer-XL relative-position shift.
+/// Transformer-XL relative-position shift, as implemented by NeMo's
+/// `RelPositionMultiHeadAttention.rel_shift` (the layout that the
+/// Conformer encoder of Cohere Transcribe was trained against).
 ///
-/// Input  shape: `[B, H, T, 2T-1]` (the `q_v @ p.T` matrix in
-///                relative-positional self-attention).
+/// Input  shape: `[B, H, T, 2T-1]` — typically the
+///   `(Q + posBiasV) @ P.T` matrix in relative-positional attention.
 /// Output shape: `[B, H, T, T]`.
 ///
 /// Output is the gather:
-///   out[b, h, i, k] = x[b, h, i, (T-1) - k + i]
 ///
-/// This realigns each row's relative-offset columns onto absolute key
-/// positions, so the result can be added to the standard `Q @ K.T`
-/// content-attention matrix and softmax'd.
+///     out[b, h, i, k] = x[b, h, i, (T-1) - i + k]
 ///
-/// Returns `INVALID_ID` on shape errors (must be exactly 4-D and the
-/// last two dims must satisfy `last == 2 * second_to_last - 1`).
+/// Equivalent to NeMo's pad-then-reshape trick: prepend a zero column
+/// to the last dim, view as [B, H, 2T, T], drop the first row, slice
+/// off the trailing T columns.
+///
+/// Returns `INVALID_ID` on shape errors.
 #[no_mangle]
 pub extern "C" fn ml_engine_rel_shift(x: u32) -> u32 {
     let mut eng = engine().lock().unwrap();
@@ -967,10 +969,11 @@ pub extern "C" fn ml_engine_rel_shift(x: u32) -> u32 {
             for i in 0..t {
                 let in_row = bi * in_stride_b + hi * in_stride_h + i * in_stride_t;
                 let out_row = bi * out_stride_b + hi * out_stride_h + i * out_stride_t;
-                // src column for output (i, k) is (T-1) + i - k. Range
-                // [i, (T-1)+i] which always lies within [0, 2T-2].
+                // Source column for output (i, k) is (T-1) - i + k.
+                // Range [(T-1)-i, (2T-2)-i] which lies in [0, 2T-2]
+                // for i in [0, T-1] and k in [0, T-1].
                 for k in 0..t {
-                    let src = (t - 1) + i - k;
+                    let src = (t - 1) - i + k;
                     out[out_row + k] = x_data[in_row + src];
                 }
             }
@@ -1016,6 +1019,8 @@ pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
     n_fft: u64,
     hop_length: u64,
     n_mels: u64,
+    n_window_size: u64,
+    preemph: f32,
     normalize_mode: u32,
 ) -> u32 {
     if samples_ptr.is_null() || samples_len == 0 {
@@ -1034,6 +1039,8 @@ pub unsafe extern "C" fn ml_engine_log_mel_spectrogram(
         n_fft as usize,
         hop_length as usize,
         n_mels as usize,
+        n_window_size as usize,
+        preemph,
         mode,
     );
     let mut eng = engine().lock().unwrap();

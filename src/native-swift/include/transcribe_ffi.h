@@ -164,6 +164,8 @@ uint32_t ml_engine_rel_shift(uint32_t x);
 uint32_t ml_engine_log_mel_spectrogram(const float* samples, uint64_t samples_len,
                                        uint32_t sample_rate, uint64_t n_fft,
                                        uint64_t hop_length, uint64_t n_mels,
+                                       uint64_t n_window_size,
+                                       float preemph,
                                        uint32_t normalize_mode);
 
 // ---------------------------------------------------------------------------

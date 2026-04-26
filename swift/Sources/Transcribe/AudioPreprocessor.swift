@@ -34,6 +34,19 @@ public enum AudioPreprocessor {
         public let nFFT: Int
         public let hopLength: Int
         public let nMels: Int
+        /// Length of the Hann window, in samples. When `< nFFT`, the
+        /// windowed signal is centered inside an `nFFT`-long zero-
+        /// padded buffer before FFT — matches PyTorch / torchaudio's
+        /// behavior when `win_length < n_fft`.
+        ///
+        /// `0` defaults to `nFFT` (Whisper convention, where window
+        /// length and FFT length match).
+        public let nWindowSize: Int
+        /// Pre-emphasis coefficient. NeMo / Cohere Transcribe use
+        /// `0.97`; Whisper uses none (`0`). Pre-emphasis is a
+        /// first-order high-pass filter applied to audio BEFORE
+        /// windowing: `y[i] = x[i] - α * x[i-1]`.
+        public let preemph: Float
         public let normalize: NormalizeMode
 
         public init(
@@ -41,26 +54,34 @@ public enum AudioPreprocessor {
             nFFT: Int = 400,
             hopLength: Int = 160,
             nMels: Int = 80,
+            nWindowSize: Int = 0,
+            preemph: Float = 0,
             normalize: NormalizeMode = .whisper
         ) {
             self.sampleRate = sampleRate
             self.nFFT = nFFT
             self.hopLength = hopLength
             self.nMels = nMels
+            self.nWindowSize = nWindowSize
+            self.preemph = preemph
             self.normalize = normalize
         }
 
-        /// Whisper-compatible: 80 mels, n_fft=400, Whisper-style
-        /// magnitude clamp. Used by `WhisperTiny`.
+        /// Whisper-compatible: 80 mels, n_fft=400, win=400, no
+        /// pre-emphasis, Whisper-style magnitude clamp.
         public static let whisper = Config()
 
         /// Cohere Transcribe / NeMo Fast-Conformer preprocessing:
-        /// 128 mels, n_fft=512, per-feature normalization.
+        /// 128 mels, n_fft=512, win=400, **pre-emphasis 0.97**,
+        /// per-feature normalization. Verified against the model's
+        /// `preprocessor_config.json`.
         public static let cohereTranscribe = Config(
             sampleRate: 16_000,
             nFFT: 512,
             hopLength: 160,
             nMels: 128,
+            nWindowSize: 400,
+            preemph: 0.97,
             normalize: .perFeature
         )
     }
@@ -80,6 +101,8 @@ public enum AudioPreprocessor {
                 UInt64(config.nFFT),
                 UInt64(config.hopLength),
                 UInt64(config.nMels),
+                UInt64(config.nWindowSize),
+                config.preemph,
                 config.normalize.rawValue
             )
         }
