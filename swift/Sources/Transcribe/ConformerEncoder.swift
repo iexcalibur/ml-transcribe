@@ -114,6 +114,32 @@ public final class ConformerEncoder {
         }
         return x
     }
+
+    /// Diagnostic-only forward: returns the post-subsampling state,
+    /// the final encoder output, and a snapshot at every Nth layer.
+    /// `everyNLayers=12` gives ~5 checkpoints for a 48-layer stack —
+    /// enough to bisect "where does the encoder collapse" without
+    /// blowing up RAM (each checkpoint is a ~250 KB tensor for a
+    /// 5-sec utterance).
+    public func forwardWithCheckpoints(
+        mel: Tensor, everyNLayers: Int = 12
+    ) -> (postSubsampling: Tensor, layerOutputs: [(layerIdx: Int, output: Tensor)], finalOutput: Tensor) {
+        let postSub = subsampling.forward(mel: mel)
+        var x = postSub
+        let tPrime = x.shape[1]
+        let posEmb = RelPosSelfAttention.makeSinusoidalPosEmb(
+            seqLen: tPrime, dModel: config.dModel
+        )
+        var captured: [(Int, Tensor)] = []
+        for (i, layer) in layers.enumerated() {
+            x = layer.forward(x, posEmb: posEmb)
+            // Capture every Nth layer plus the very first and last.
+            if i == 0 || i == layers.count - 1 || (i + 1) % everyNLayers == 0 {
+                captured.append((i, x))
+            }
+        }
+        return (postSub, captured, x)
+    }
 }
 
 // =============================================================================

@@ -150,7 +150,10 @@ public final class CohereTranscribe {
     // -------------------------------------------------------------
 
     public let config: Config
-    private let encoder: ConformerEncoder
+    /// The underlying Fast-Conformer encoder. Public for diagnostic
+    /// access (`forwardWithCheckpoints`); production callers should
+    /// use `runEncoder` and `transcribe` instead.
+    public let encoder: ConformerEncoder
     private let weights: Weights
     private let decoderLayers: [DecoderLayer]
     /// Pre-computed sinusoidal position table for the decoder,
@@ -230,6 +233,32 @@ public final class CohereTranscribe {
     // -------------------------------------------------------------
     // Decoder step
     // -------------------------------------------------------------
+
+    /// Like `decoderStep` but returns the full logit vector
+    /// `[V]` instead of just the argmax. Useful for diagnostics
+    /// (top-K probabilities, entropy, etc.). Has the same side
+    /// effects as `decoderStep` (advances every layer's KV cache).
+    public func decoderStepLogits(tokenId: Int) throws -> [Float] {
+        let pos = decoderLayers[0].cacheLength
+        let tokenEmb = weights.embedTokens.embed(tokens: [tokenId])
+        let posRow = decoderPosTable.embed(tokens: [pos])
+        var h = tokenEmb.add(posRow).layerNorm(
+            gamma: weights.embedNormGamma,
+            beta:  weights.embedNormBeta,
+            eps:   config.layerNormEps
+        )
+        for layer in decoderLayers {
+            h = try layer.step(h, config: config)
+        }
+        let normed = h.layerNorm(
+            gamma: weights.decoderFinalNormGamma,
+            beta:  weights.decoderFinalNormBeta,
+            eps:   config.layerNormEps
+        )
+        let bias3 = weights.headBias.reshape([1, 1, config.vocabSize])
+        let logits = normed.matmul(weights.headWeight).add(bias3)
+        return logits.toArray()
+    }
 
     /// Run a single decoder step on `tokenId`, advancing every
     /// layer's self-attn cache by one position. Returns the predicted

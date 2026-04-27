@@ -262,6 +262,478 @@ final class CohereTranscribeIntegrationTests: XCTestCase {
         }
     }
 
+    /// Capture the top-K predicted logits + probabilities at each
+    /// decoder step. If the top probabilities are diffuse (all
+    /// roughly equal), the model is uncertain — explains repetition.
+    /// If top-1 is sharply peaked but on the wrong token, that's a
+    /// different bug.
+    func testCohereTopKLogitsPerStep() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+        let config = CohereTranscribe.Config(bosTokenId: 4, eosTokenId: 3, padTokenId: 2)
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let model = CohereTranscribe(config: config, weights: weights)
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+
+        let dirPath = ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+        let wavPath = (dirPath as NSString).appendingPathComponent("tts_sample.wav")
+        let samples = try Self.loadWav16kMono(wavPath)
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: samples, config: .cohereTranscribe,
+            filterbankOverride: model.preprocessorFb
+        )
+        let melB = mel.reshape([1, mel.shape[0], mel.shape[1]])
+        model.reset()
+        model.setEncoderContext(mel: melB)
+
+        // Step through each prompt token and print top-K of what
+        // the model predicts NEXT.
+        let prompt = [7, 4, 16, 62, 62, 5, 9, 11, 13]
+        for (stepIdx, tok) in prompt.enumerated() {
+            let logits = try model.decoderStepLogits(tokenId: tok)
+            let label = "after prompt[\(stepIdx)]=\(tok)"
+            printTopK(logits: logits, label: label,
+                      tokenizer: tokenizer, k: 8, stderr: stderr)
+        }
+        // 5 more generation steps following greedy.
+        var lastPred = argmax(try model.decoderStepLogits(tokenId: prompt.last!))
+        // Note: we already ran the last prompt step above, so the
+        // KV cache is now at length=9. We can't run again; instead
+        // do greedy continuation.
+        var emitted: [Int] = []
+        for _ in 0..<8 {
+            if lastPred == config.eosTokenId { break }
+            emitted.append(lastPred)
+            let logits = try model.decoderStepLogits(tokenId: lastPred)
+            printTopK(logits: logits, label: "after gen=\(lastPred)",
+                      tokenizer: tokenizer, k: 5, stderr: stderr)
+            lastPred = argmax(logits)
+        }
+        stderr.write(("[result] generated tokens: \(emitted)\n").data(using: .utf8)!)
+        let text = try tokenizer.decode(
+            emitted.map { UInt32($0) }, skipSpecialTokens: true)
+        stderr.write(("[result] text: \(text.debugDescription)\n").data(using: .utf8)!)
+    }
+
+    private func argmax(_ xs: [Float]) -> Int {
+        var best = 0; var bestVal = xs[0]
+        for i in 1..<xs.count where xs[i] > bestVal { bestVal = xs[i]; best = i }
+        return best
+    }
+
+    private func printTopK(logits: [Float], label: String,
+                           tokenizer: Tokenizer, k: Int,
+                           stderr: FileHandle) {
+        var indexed = logits.enumerated().map { ($0.offset, $0.element) }
+        indexed.sort { $0.1 > $1.1 }
+        let top = Array(indexed.prefix(k))
+        let maxLogit = top[0].1
+        var partition: Float = 0
+        for v in logits { partition += expf(v - maxLogit) }
+        var lines = ["[\(label)] top-\(k) (max logit \(String(format: "%.2f", maxLogit))):\n"]
+        for (i, v) in top {
+            let prob = expf(v - maxLogit) / partition
+            let tok = (try? tokenizer.decode([UInt32(i)], skipSpecialTokens: false)) ?? "<?>"
+            lines.append("    \(i) (\(tok)): logit=\(String(format: "%+.3f", v)) prob=\(String(format: "%.4f", prob))\n")
+        }
+        stderr.write(lines.joined().data(using: .utf8)!)
+    }
+
+    /// Inspect the decoder's embedding LN gamma + final LN gamma.
+    /// If either has tiny gammas concentrated in specific dimensions,
+    /// the residual stream may project onto a direction that
+    /// over-favors specific tokens.
+    func testCohereDecoderNormStats() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+        let raw = try SafetensorsWeights(path: dir.safetensors, keepF16: true)
+        for name in [
+            "transf_decoder._embedding.layer_norm.weight",
+            "transf_decoder._embedding.layer_norm.bias",
+            "transf_decoder._decoder.final_layer_norm.weight",
+            "transf_decoder._decoder.final_layer_norm.bias",
+        ] {
+            guard let t = raw[name] else { continue }
+            let arr = t.toArray()
+            let mn = arr.min()!, mx = arr.max()!
+            let mean = arr.reduce(0, +) / Float(arr.count)
+            let absMean = arr.map { abs($0) }.reduce(0, +) / Float(arr.count)
+            let nearZero = arr.filter { abs($0) < 0.05 }.count
+            stderr.write((
+                "  \(name): min=\(String(format: "%+.3f", mn)) " +
+                "max=\(String(format: "%+.3f", mx)) " +
+                "mean=\(String(format: "%+.3f", mean)) " +
+                "avg|x|=\(String(format: "%.3f", absMean)) " +
+                "near_zero=\(nearZero)/\(arr.count)\n"
+            ).data(using: .utf8)!)
+        }
+    }
+
+    /// Look at the LM head bias and weight. If certain tokens have
+    /// huge biases (e.g. BOS=4, "the"=527 if those are over-biased)
+    /// the model would predict them regardless of decoder hidden
+    /// state.
+    func testCohereHeadBiasAndWeightsTopK() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+        let raw = try SafetensorsWeights(path: dir.safetensors, keepF16: true)
+        let bias = raw["log_softmax.mlp.layer0.bias"]!
+        let arr = bias.toArray()
+        // Sort by descending value, show top 10 + bottom 10.
+        var indexed = arr.enumerated().map { ($0.offset, $0.element) }
+        indexed.sort { $0.1 > $1.1 }
+        stderr.write("HEAD BIAS top 15:\n".data(using: .utf8)!)
+        for (i, v) in indexed.prefix(15) {
+            stderr.write(("  id=\(i) bias=\(String(format: "%+.3f", v))\n").data(using: .utf8)!)
+        }
+        stderr.write("HEAD BIAS bottom 5:\n".data(using: .utf8)!)
+        for (i, v) in indexed.suffix(5) {
+            stderr.write(("  id=\(i) bias=\(String(format: "%+.3f", v))\n").data(using: .utf8)!)
+        }
+        // Specific tokens we care about.
+        let watchIds: [Int] = [3, 4, 5, 7, 9, 11, 13, 16, 62, 527, 752, 832, 13764, 13785, 1617]
+        stderr.write("HEAD BIAS for specific tokens:\n".data(using: .utf8)!)
+        for i in watchIds {
+            stderr.write(("  id=\(i) bias=\(String(format: "%+.3f", arr[i]))\n").data(using: .utf8)!)
+        }
+
+        // Check stats
+        let mean = arr.reduce(0, +) / Float(arr.count)
+        let mn = arr.min()!, mx = arr.max()!
+        let std = self.stddev(arr)
+        stderr.write(("HEAD BIAS stats: mean=\(mean) std=\(std) min=\(mn) max=\(mx)\n").data(using: .utf8)!)
+    }
+
+    /// Inspect cross-attention attention scores. After running the
+    /// encoder + first decoder step, dump Q@K.T softmax scores per
+    /// head. If scores are uniform (~1/T_enc everywhere), the
+    /// decoder isn't focusing on specific encoder time steps;
+    /// repetition is the natural consequence.
+    func testCohereCrossAttentionScores() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+
+        let config = CohereTranscribe.Config(bosTokenId: 4, eosTokenId: 3, padTokenId: 2)
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let dirPath = ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+        let wavPath = (dirPath as NSString).appendingPathComponent("tts_sample.wav")
+        let samples = try Self.loadWav16kMono(wavPath)
+
+        // Run encoder, project to decoder dim.
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: samples, config: .cohereTranscribe,
+            filterbankOverride: weights.preprocessorFb.map {
+                $0.shape.count == 3 && $0.shape[0] == 1
+                    ? $0.reshape([$0.shape[1], $0.shape[2]])
+                    : $0
+            }
+        )
+        let melB = mel.reshape([1, mel.shape[0], mel.shape[1]])
+
+        // Compute encoder + projection manually.
+        let model = CohereTranscribe(config: config, weights: weights)
+        let encOut = model.runEncoder(mel: melB)    // [1, T_enc, 1024]
+        let T_enc = encOut.shape[1]
+        let decDim = config.decoderHidden
+        let H = config.decoderHeads
+        let Dh = config.decoderHeadDim
+        stderr.write(("[cross-attn] T_enc=\(T_enc) D=\(decDim) H=\(H) Dh=\(Dh)\n").data(using: .utf8)!)
+
+        // Look at layer 0's cross-attn weights.
+        let layerW = weights.decoderLayers[0]
+        // K = encOut @ caWK + caBK; reshape to [H, T_enc, Dh].
+        let bK = layerW.caBK.reshape([1, 1, decDim])
+        let kFull = encOut.matmul(layerW.caWK).add(bK)
+        let kH = kFull.reshape([1, T_enc, H, Dh])
+            .permute([0, 2, 1, 3]).contiguous()
+            .reshape([H, T_enc, Dh])
+
+        // Build a synthetic Q (random-but-deterministic so the test
+        // is reproducible). What we want is to see how K varies
+        // across encoder time steps for a fixed Q.
+        var rng = SeededRNG(seed: 42)
+        let qData = (0..<(H * Dh)).map { _ in Float.random(in: -1.0...1.0, using: &rng) }
+        let q = try Tensor.from(data: qData, shape: [H, 1, Dh])
+
+        // Compute attention: softmax(Q @ K.T / sqrt(Dh))
+        let kT = kH.permute([0, 2, 1]).contiguous()    // [H, Dh, T_enc]
+        let scores = q.matmul(kT)                       // [H, 1, T_enc]
+        let scoresArr = scores.toArray()
+        // Print per-head: min, max, range. If max/min ratio is huge,
+        // softmax will peak. If close to 1, softmax is uniform.
+        for h in 0..<H {
+            let off = h * T_enc
+            var row: [Float] = []
+            for t in 0..<T_enc { row.append(scoresArr[off + t]) }
+            let mn = row.min()!
+            let mx = row.max()!
+            let mean = row.reduce(0, +) / Float(T_enc)
+            stderr.write(("  head \(h): score min=\(String(format: "%.2f", mn)) max=\(String(format: "%.2f", mx)) mean=\(String(format: "%.2f", mean)) range=\(String(format: "%.2f", mx - mn))\n").data(using: .utf8)!)
+        }
+
+        // Also K stats across time per head.
+        let kArr = kH.toArray()
+        for h in 0..<min(2, H) {
+            var l2s: [Float] = []
+            for t in 0..<T_enc {
+                let off = (h * T_enc + t) * Dh
+                var s: Float = 0
+                for d in 0..<Dh { let v = kArr[off + d]; s += v * v }
+                l2s.append(sqrtf(s))
+            }
+            let mn = l2s.min()!, mx = l2s.max()!
+            let avg = l2s.reduce(0, +) / Float(T_enc)
+            stderr.write(("  head \(h) K L2: min=\(String(format: "%.3f", mn)) max=\(String(format: "%.3f", mx)) avg=\(String(format: "%.3f", avg))\n").data(using: .utf8)!)
+        }
+    }
+
+    /// Compare different prompt strategies on the SAME audio sample.
+    /// The README's quick-start uses just `[decoder_start_token_id=13764]`,
+    /// `model.transcribe()` uses the full build_prompt. Try a few
+    /// permutations and see which produces sensible English.
+    func testCoherePromptVariants() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+        let config = CohereTranscribe.Config(bosTokenId: 4, eosTokenId: 3, padTokenId: 2)
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let model = CohereTranscribe(config: config, weights: weights)
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+        let dirPath = ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+        let wavPath = (dirPath as NSString).appendingPathComponent("tts_sample.wav")
+        let samples = try Self.loadWav16kMono(wavPath)
+
+        // Run encoder once and reuse for all prompts.
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: samples, config: .cohereTranscribe,
+            filterbankOverride: model.preprocessorFb
+        )
+        let melB = mel.reshape([1, mel.shape[0], mel.shape[1]])
+
+        let promptVariants: [(String, [Int])] = [
+            ("just decoder_start (13764)", [13764]),
+            ("build_prompt (NeMo style)", [7, 4, 16, 62, 62, 5, 9, 11, 13]),
+            ("13764 + build_prompt", [13764, 7, 4, 16, 62, 62, 5, 9, 11, 13]),
+            ("just BOS (4)", [4]),
+            ("BOS + build_prompt", [4, 16, 62, 62, 5, 9, 11, 13]),
+        ]
+
+        for (label, promptTokens) in promptVariants {
+            model.reset()
+            model.setEncoderContext(mel: melB)
+            var nextTok = -1
+            for tok in promptTokens {
+                nextTok = try model.decoderStep(tokenId: tok)
+            }
+            var tokens: [Int] = []
+            for _ in 0..<25 {
+                if nextTok == config.eosTokenId { break }
+                tokens.append(nextTok)
+                nextTok = try model.decoderStep(tokenId: nextTok)
+            }
+            let text = try tokenizer.decode(
+                tokens.map { UInt32($0) }, skipSpecialTokens: true)
+            stderr.write((
+                "[\(label)] tokens=\(tokens.prefix(10)) text=\(text.debugDescription)\n"
+            ).data(using: .utf8)!)
+        }
+    }
+
+    /// Decode the `decoder_start_token_id` (13764) from
+    /// generation_config.json. The README quick-start example does
+    /// NOT pass text= to the processor, so the actual default
+    /// decoder prompt is just `[13764]`, not the long build_prompt
+    /// sequence (which is only used by `model.transcribe()`).
+    func testCohereDecodeMagicStartToken() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+        let stderr = FileHandle.standardError
+        for id: UInt32 in [4, 5, 7, 9, 11, 13, 16, 62, 13764] {
+            let s = try tokenizer.decode([id], skipSpecialTokens: false)
+            stderr.write(("  \(id) → \(s.debugDescription)\n").data(using: .utf8)!)
+        }
+    }
+
+    /// Verify the prompt token order I hardcoded matches what NeMo's
+    /// `build_prompt(language='en', punctuation=True)` produces when
+    /// fed through the SentencePiece tokenizer with
+    /// `add_special_tokens=False`. If the actual encoding differs,
+    /// the model is being primed wrong.
+    func testCohereBuildPromptTokenization() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let tokenizer = try Tokenizer(path: dir.tokenizer)
+        let prompt = "<|startofcontext|><|startoftranscript|><|emo:undefined|><|en|><|en|><|pnc|><|noitn|><|notimestamp|><|nodiarize|>"
+        let stderr = FileHandle.standardError
+        let ids = try tokenizer.encode(prompt, addSpecialTokens: false)
+        stderr.write(("[prompt] '\(prompt)'\n").data(using: .utf8)!)
+        stderr.write(("[prompt] ids (no special): \(ids)\n").data(using: .utf8)!)
+        let withSpecial = try tokenizer.encode(prompt, addSpecialTokens: true)
+        stderr.write(("[prompt] ids (with special): \(withSpecial)\n").data(using: .utf8)!)
+
+        // Decode each id back to verify
+        for id in ids {
+            let s = try tokenizer.decode([id], skipSpecialTokens: false)
+            stderr.write(("  \(id) → \(s.debugDescription)\n").data(using: .utf8)!)
+        }
+    }
+
+    /// Inspect the per-layer `norm_out.weight` (LayerNorm gamma)
+    /// for the encoder. If the gammas are tiny (close to 0) for
+    /// the last layers, the model's design legitimately produces a
+    /// small-magnitude encoder output and the encoder→decoder
+    /// projection is supposed to scale it back up. If they're
+    /// uniform (~1.0) and the magnitude still drops, our forward
+    /// pass has a bug.
+    func testCohereNormOutGammaPerLayer() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let raw = try SafetensorsWeights(path: dir.safetensors, keepF16: true)
+        let stderr = FileHandle.standardError
+        for i in 0..<48 {
+            let name = "encoder.layers.\(i).norm_out.weight"
+            guard let g = raw[name] else { continue }
+            let arr = g.toArray()
+            var minV = arr[0], maxV = arr[0]
+            var sumAbs: Float = 0
+            for v in arr {
+                if v < minV { minV = v }
+                if v > maxV { maxV = v }
+                sumAbs += abs(v)
+            }
+            let avgAbs = sumAbs / Float(arr.count)
+            let line = String(
+                format: "  layer %2d norm_out: min=%+.3f max=%+.3f avg|x|=%.3f\n",
+                i, minV, maxV, avgAbs)
+            stderr.write(line.data(using: .utf8)!)
+        }
+    }
+
+    /// Diagnostic for "encoder produces flat features" hypothesis.
+    /// Runs the encoder with checkpoints at layers 0, 12, 24, 36, 47,
+    /// and the post-subsampling input. For each checkpoint, prints
+    /// adjacent-time-step cosine similarities. If adjacent t's are
+    /// nearly identical, that layer is collapsing time-variation.
+    /// Bisecting tells us WHERE the bug is.
+    func testCohereEncoderTimeVariance() throws {
+        let dir = try cohereDir()
+        guard ProcessInfo.processInfo.environment["COHERE_RUN_E2E"] == "1"
+        else { throw XCTSkip("set COHERE_RUN_E2E=1 to run") }
+        let stderr = FileHandle.standardError
+        func say(_ s: String) {
+            stderr.write(("[diag] " + s + "\n").data(using: .utf8)!)
+        }
+        let config = CohereTranscribe.Config.cohereTranscribe2B
+        say("loading weights...")
+        let weights = try CohereTranscribeWeightMap.load(
+            from: dir.safetensors, config: config, keepF16: true
+        )
+        let model = CohereTranscribe(config: config, weights: weights)
+
+        // Use the TTS "quick brown fox" sample.
+        let dirPath = ProcessInfo.processInfo.environment["COHERE_TRANSCRIBE_DIR"]!
+        let wavCandidates = [
+            (dirPath as NSString).appendingPathComponent("tts_sample.wav"),
+            "/tmp/tts_sample.wav",
+        ]
+        var wavPath: String?
+        for p in wavCandidates where FileManager.default.fileExists(atPath: p) {
+            wavPath = p; break
+        }
+        guard let wp = wavPath else {
+            let joined = wavCandidates.joined(separator: ", ")
+            throw XCTSkip("no tts_sample.wav at \(joined)")
+        }
+        let samples = try Self.loadWav16kMono(wp)
+        say("audio: \(samples.count / 16_000) sec from \(wp)")
+
+        say("computing mel + checkpoints...")
+        let mel = AudioPreprocessor.logMelSpectrogram(
+            samples: samples, config: .cohereTranscribe,
+            filterbankOverride: model.preprocessorFb
+        )
+        let melB = mel.reshape([1, mel.shape[0], mel.shape[1]])
+
+        // Bisect aggressively around the suspicious last-layer drop:
+        // checkpoint every 3 layers so we can see exactly where L2
+        // magnitude collapses.
+        let result = model.encoder.forwardWithCheckpoints(
+            mel: melB, everyNLayers: 3
+        )
+        report(label: "post-subsampling (input to layer 0)",
+               t: result.postSubsampling, say: say)
+        for (idx, out) in result.layerOutputs {
+            report(label: "after layer \(idx)", t: out, say: say)
+        }
+        report(label: "encoder final (= last layer)",
+               t: result.finalOutput, say: say)
+    }
+
+    /// Print time-variance stats for a [1, T, D] tensor.
+    private func report(label: String, t: Tensor, say: (String) -> Void) {
+        let shape = t.shape
+        guard shape.count == 3, shape[0] == 1 else {
+            say("[\(label)] unexpected shape \(shape)")
+            return
+        }
+        let T = shape[1]
+        let D = shape[2]
+        let arr = t.toArray()
+
+        // L2 norm per t.
+        var l2: [Float] = []
+        for ti in 0..<T {
+            let off = ti * D
+            var s: Float = 0
+            for d in 0..<D { let v = arr[off + d]; s += v * v }
+            l2.append(sqrtf(s))
+        }
+        // Adjacent cosine similarity.
+        var adj: [Float] = []
+        for ti in 0..<(T - 1) {
+            let o1 = ti * D, o2 = (ti + 1) * D
+            var dot: Float = 0, n1: Float = 0, n2: Float = 0
+            for d in 0..<D {
+                let a = arr[o1 + d], b = arr[o2 + d]
+                dot += a * b; n1 += a * a; n2 += b * b
+            }
+            adj.append(dot / (sqrtf(n1) * sqrtf(n2) + 1e-9))
+        }
+        let l2Avg = l2.reduce(0, +) / Float(T)
+        let adjAvg = adj.reduce(0, +) / Float(max(1, adj.count))
+        say("[\(label)] T=\(T) D=\(D) l2_avg=\(String(format: "%.3f", l2Avg)) " +
+            "l2_std=\(String(format: "%.3f", stddev(l2))) " +
+            "adj_cos_avg=\(String(format: "%.4f", adjAvg)) " +
+            "(min=\(String(format: "%.4f", adj.min() ?? 0)) " +
+            "max=\(String(format: "%.4f", adj.max() ?? 0)))")
+    }
+
+    /// Sample standard deviation helper.
+    private func stddev(_ xs: [Float]) -> Float {
+        let mean = xs.reduce(0, +) / Float(xs.count)
+        let sq = xs.map { ($0 - mean) * ($0 - mean) }.reduce(0, +)
+        return sqrtf(sq / Float(max(1, xs.count - 1)))
+    }
+
     /// Bisect helper: feed silence vs real speech through the same
     /// model and print the tokens each produces. If the outputs
     /// differ, the encoder is reading audio (good); if identical,
