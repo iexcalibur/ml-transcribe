@@ -193,8 +193,16 @@ public final class CohereTranscribe {
         self.decoderLayers = weights.decoderLayers.map {
             DecoderLayer(config: config, weights: $0)
         }
+        // Cohere's stored `transf_decoder._embedding.position_embedding.
+        // pos_enc` is the standard sinusoidal formula divided by
+        // sqrt(d_model). Match that scaling exactly — without it,
+        // position embeddings are ~32× too large for d_model=1024
+        // and the decoder's first cross-attn step over-weights
+        // position-0 features.
+        let scale = 1.0 / sqrtf(Float(config.decoderHidden))
         self.decoderPosTable = Self.makeFixedSinusoidalPosTable(
-            maxLen: config.maxSeqLen, dim: config.decoderHidden
+            maxLen: config.maxSeqLen, dim: config.decoderHidden,
+            scale: scale
         )
     }
 
@@ -233,6 +241,54 @@ public final class CohereTranscribe {
     // -------------------------------------------------------------
     // Decoder step
     // -------------------------------------------------------------
+
+    /// Diagnostic intermediate states at one decoder step.
+    /// Each tensor is `[1, 1, decoderHidden]` except logits which
+    /// is `[1, 1, vocabSize]`.
+    public struct DecoderStepDebug {
+        public let embedding: Tensor       // post tokenEmb + posEmb + LN
+        public let layer0: Tensor          // output of decoder layer 0
+        public let layer7: Tensor          // output of decoder layer 7 (last)
+        public let finalNorm: Tensor       // post-final-LN hidden
+        public let logits: [Float]         // raw logits, shape [vocabSize]
+    }
+
+    /// Like `decoderStep` but captures intermediate hidden states
+    /// at four checkpoints (embedding, layer 0, layer 7, final
+    /// norm). Use to compare against PyTorch ground-truth
+    /// activations layer-by-layer.
+    public func decoderStepDebug(tokenId: Int) throws -> DecoderStepDebug {
+        let pos = decoderLayers[0].cacheLength
+        let tokenEmb = weights.embedTokens.embed(tokens: [tokenId])
+        let posRow = decoderPosTable.embed(tokens: [pos])
+        let embedding = tokenEmb.add(posRow).layerNorm(
+            gamma: weights.embedNormGamma,
+            beta:  weights.embedNormBeta,
+            eps:   config.layerNormEps
+        )
+        var h = embedding
+        var layer0Out: Tensor? = nil
+        var layer7Out: Tensor? = nil
+        for (i, layer) in decoderLayers.enumerated() {
+            h = try layer.step(h, config: config)
+            if i == 0 { layer0Out = h }
+            if i == decoderLayers.count - 1 { layer7Out = h }
+        }
+        let normed = h.layerNorm(
+            gamma: weights.decoderFinalNormGamma,
+            beta:  weights.decoderFinalNormBeta,
+            eps:   config.layerNormEps
+        )
+        let bias3 = weights.headBias.reshape([1, 1, config.vocabSize])
+        let logits = normed.matmul(weights.headWeight).add(bias3)
+        return DecoderStepDebug(
+            embedding: embedding,
+            layer0: layer0Out!,
+            layer7: layer7Out!,
+            finalNorm: normed,
+            logits: logits.toArray()
+        )
+    }
 
     /// Like `decoderStep` but returns the full logit vector
     /// `[V]` instead of just the argmax. Useful for diagnostics
@@ -387,8 +443,15 @@ public final class CohereTranscribe {
     /// We make this a 2-D tensor (rather than 3-D like the encoder's
     /// rel-pos table) so we can use `embed(tokens:)` for fast
     /// row-by-position lookup at each decoder step.
+    ///
+    /// `scale` multiplies every entry. NeMo / Cohere Transcribe stores
+    /// its `pos_enc` buffer pre-scaled by `1/sqrt(dim)` (verified by
+    /// reading `transf_decoder._embedding.position_embedding.pos_enc`
+    /// from the safetensors and comparing to the formula above). Pass
+    /// `scale: 1.0 / sqrt(Float(dim))` to match. Whisper / TinyLlama
+    /// callers pass `scale: 1.0` for the unscaled standard formula.
     public static func makeFixedSinusoidalPosTable(
-        maxLen: Int, dim: Int
+        maxLen: Int, dim: Int, scale: Float = 1.0
     ) -> Tensor {
         precondition(dim % 2 == 0, "dim must be even, got \(dim)")
         var data = [Float](repeating: 0, count: maxLen * dim)
@@ -397,8 +460,8 @@ public final class CohereTranscribe {
                 let exponent = Float(2 * k) / Float(dim)
                 let invFreq = expf(-logf(10_000) * exponent)
                 let theta = Float(pos) * invFreq
-                data[pos * dim + 2 * k]     = sinf(theta)
-                data[pos * dim + 2 * k + 1] = cosf(theta)
+                data[pos * dim + 2 * k]     = sinf(theta) * scale
+                data[pos * dim + 2 * k + 1] = cosf(theta) * scale
             }
         }
         return try! Tensor.from(data: data, shape: [maxLen, dim])
